@@ -1,0 +1,1 @@
+Reads and prints out info about a gisnap memory dump.

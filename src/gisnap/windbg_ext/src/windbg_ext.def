@@ -1,0 +1,7 @@
+LIBRARY "windbg_ext.DLL"
+
+EXPORTS
+    WinDbgExtensionDllInit
+    ExtensionApiVersion
+    gisnap
+    help
