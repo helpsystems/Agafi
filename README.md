@@ -1,7 +1,6 @@
 ##What is Agafi/ROP?
 
 Agafi/ROP is a Win32 command line tool chain useful to find gadgets and build ROP-Chains used by x86 binary exploits.
-                                
 
 ##What is Agafi?
 
@@ -25,6 +24,9 @@ Agafi-ROP is a x86 ROP-Chainer tool oriented to build ROP chains for win32 progr
 
 Using Agafi as gadget-finder + Agafi-ROP as good and fast ROP-Chainer engine, this tool is able to build ROP-Chains to bypass DEP in binary exploits.
 
+Agafi-ROP re-building a ROP-Chain with "invalid chars" to "hxds.dll" v2.5.50727.198 ...
+
+![Agafi in action ...](https://github.com/CoreSecurity/Agafi/blob/master/agafi-rop.png)
 
 ##Where can Agafi find gadgets?
 
