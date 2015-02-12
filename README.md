@@ -58,3 +58,10 @@ Please, download this from (https://code.google.com/p/distorm/downloads/detail?n
 
 Agafi/ROP is released under version 3 of the GNU General Public License.
 
+
+##Contact
+
+If you have some suggestion or some bug to report, please contact to the authors.
+
+Agafi/Agafi-ROP (neconomou@coresecurity.com)
+Gisnap modules (djuarez@coresecurity.com)
