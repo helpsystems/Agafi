@@ -92,7 +92,7 @@ void ProcessList::FillList()
 	if(Process32First(h_snapshot, &_tmpProcEntry32)) {
 		do {
 			_tmphProcess = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE,  _tmpProcEntry32.th32ProcessID);
-			if(_tmphProcess == INVALID_HANDLE_VALUE)
+			if(_tmphProcess == 0)
 				continue;
 #ifndef _WIN64
 		// only list 32bit processes
@@ -125,69 +125,6 @@ void ProcessList::FillList()
 	}
 	CloseHandle(h_snapshot);
 }
-/*
-
-//------------------------------------------------------------------------------------------------------
-void ProcessList::FillList()
-//------------------------------------------------------------------------------------------------------
-{
-	ListEmpty();
-
-	DWORD tmp=0;
-	DWORD a_pids[1024];
-	memset(a_pids, 0xff, sizeof(a_pids));
-	BOOL res = EnumProcesses(a_pids, sizeof(a_pids), &tmp);
-	unsigned int maxidx=tmp/sizeof(DWORD);
-	WORD index=0;
-	BOOL is64b=FALSE;
-
-	for(unsigned int i=0;i<=maxidx;i++) {
-		if(a_pids[i] == 0xffffffff)
-			continue;
-		HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE,  a_pids[i]);
-		if(!hProcess) {
-			continue;
-		}
-		
-
-#ifndef _WIN64
-		// only list 32bit processes
-		SYSTEM_INFO sysinfo;
-		GetNativeSystemInfo(&sysinfo);
-		if(sysinfo.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_AMD64) {
-			IsWow64Process(hProcess, &is64b);
-				if(!is64b) {
-					continue;
-				}
-		}
-#else
-		// only list 64bit processes
-		SYSTEM_INFO sysinfo;
-		GetNativeSystemInfo(&sysinfo);
-		if(sysinfo.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_AMD64) {
-			IsWow64Process(hProcess, &is64b);
-				if(is64b) {
-					continue;
-				}
-		}
-#endif
-		char szProcessName[1024];
-		memset(szProcessName, 0, sizeof(szProcessName));
-		GetProcessImageFileName(hProcess, szProcessName, sizeof(szProcessName));
-		CloseHandle(hProcess);
-		char *filename = strrchr(szProcessName, '\\');
-		if(!filename) {
-			filename = "System";
-		} else
-			filename++;
-		aListNames[index].pid = a_pids[i];
-
-		lstrcpyn(aListNames[index].name, filename, 1023);
-		ListPrint("[%05d] - %s", aListNames[index].pid, aListNames[index].name);
-		index++;
-	}
-}
-*/
 
 //------------------------------------------------------------------------------------------------------
 void ProcessList::ListPrint(char *formatstring, ...)

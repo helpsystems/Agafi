@@ -23,9 +23,12 @@ class MemorySnapshot
 		void MemorySnapshot::__setASLRDEP(MEM_BLOCK *tmpblock, uint64_t dllbase);
 
 		uint32_t MemorySnapshot::__getArch();
+		bool MemorySnapshot::__isProcessSameArch();
 		uint32_t MemorySnapshot::__translateProtFlags(uint32_t prot);
 
 		HANDLE hprocess;
+		DWORD hpid;
+
 		std::vector<MEM_BLOCK> memblocks;
 		std::vector<MODULEENTRY32> __modulelist;
 	

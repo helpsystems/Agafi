@@ -45,7 +45,7 @@ uint32_t MemorySnapshot::__getArch()
 void MemorySnapshot::__getBlockInfo(MEM_BLOCK *tmpblock, char *name)
 {
 	*name = 0;
-	HANDLE h_snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetProcessId(hprocess));
+	HANDLE h_snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, hpid);
 	if(h_snapshot == INVALID_HANDLE_VALUE)
 		return;
 	MODULEENTRY32 __modentry;
@@ -98,6 +98,24 @@ void MemorySnapshot::__setASLRDEP(MEM_BLOCK *tmpblock, uint64_t dllbase)
 	}
 }
 
+// try to guess process arch
+bool MemorySnapshot::__isProcessSameArch()
+{
+	BOOL res = FALSE;
+#ifndef _WIN64		// 32bit process fails to create snapshot of 64bit process
+	HANDLE h_snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, hpid);
+	if(h_snapshot != INVALID_HANDLE_VALUE) {
+		res = TRUE;
+	}
+	CloseHandle(h_snapshot);
+#else
+	IsWow64Process(hprocess, &res);
+	res = !res;
+#endif
+	return (bool)res;
+}
+
+
 uint32_t MemorySnapshot::__translateProtFlags(uint32_t prot)
 {
 	uint32_t flags=0;
@@ -130,10 +148,19 @@ uint32_t MemorySnapshot::__translateProtFlags(uint32_t prot)
 
 bool MemorySnapshot::Dump(DWORD pid, char *filename)
 {
+	bool res = false;		// return value
+
+	hpid = pid;
+
 	// open process
-//	hprocess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_SET_INFORMATION, FALSE, pid);
-	hprocess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ , FALSE, pid);
-	BOOL bIs64 = (__getArch() == ARCH_X64) ;
+	hprocess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ , FALSE, hpid);
+	if(hprocess == 0)
+		return res;
+
+	BOOL bIs64 = (__getArch() == ARCH_X64);
+
+	if(!__isProcessSameArch())
+		return res;		// we got passed an x64 pid on a 32bit gisnap or vice versa
 
 	// fill a vector with valid memory blocks
 	MEM_BLOCK tmpblock = {0};
@@ -164,7 +191,7 @@ bool MemorySnapshot::Dump(DWORD pid, char *filename)
 	// create dumpfile
 	FILE *dumpfile = fopen(filename, "wb" );
 	if(!dumpfile) {
-		return false;
+		return res;
 	}
 
 	SNAPSHOTFILE snphdr = {0};
@@ -173,6 +200,8 @@ bool MemorySnapshot::Dump(DWORD pid, char *filename)
 	snphdr.flags = __getArch() | OS_WINDOWS;
 
 	snphdr.blockcount = (uint32_t)memblocks.size();
+	if(snphdr.blockcount > 0)
+		res = true;
 
 	// write header SNAPSHOTFILE
 	fwrite ( &snphdr, sizeof(SNAPSHOTFILE) , 1 , dumpfile);
@@ -204,5 +233,5 @@ bool MemorySnapshot::Dump(DWORD pid, char *filename)
 	CloseHandle(hprocess);
 	SetProgressBar(100);
 
-	return true;
+	return res;
 }

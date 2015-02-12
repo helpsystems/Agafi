@@ -27,6 +27,8 @@ LPWSTR *szArglist=0;
 int nArgs=0;
 
 BOOL InitInstance(HINSTANCE hInstance, int nCmdShow);
+BOOL SetProcessPrivilege();
+
 INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT message, WPARAM wParam, LPARAM lParam);
 
 int APIENTRY _tWinMain(HINSTANCE hInstance,
@@ -73,7 +75,9 @@ int APIENTRY _tWinMain(HINSTANCE hInstance,
 
 BOOL SetPrivilege(HANDLE hToken, LPCTSTR lpszPrivilege, BOOL bEnablePrivilege)
 {
-	TOKEN_PRIVILEGES pTokenPrivileges;
+	TOKEN_PRIVILEGES pTokenPrivileges = {0};
+	TOKEN_PRIVILEGES oldTokenPrivileges = {0};
+	DWORD cbSize=0;
 	LUID luid;
 
 	if( !LookupPrivilegeValue( NULL, lpszPrivilege, &luid ) ) { 
@@ -98,13 +102,16 @@ BOOL SetPrivilege(HANDLE hToken, LPCTSTR lpszPrivilege, BOOL bEnablePrivilege)
 BOOL SetProcessPrivilege()
 {
 	HANDLE pToken = NULL;
-	OpenProcessToken(GetCurrentProcess(), TOKEN_ALL_ACCESS, &pToken);
+	OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES, &pToken);
 	return SetPrivilege(pToken, SE_DEBUG_NAME, TRUE);
 }
 
 
 BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
 {
+
+	SetProcessPrivilege();
+
 	hInst = hInstance; // Store instance handle in our global variable
 	INITCOMMONCONTROLSEX InitCtrlEx;
 
@@ -123,7 +130,7 @@ int SetProgressBar(unsigned int progress)
 		return 0;
 	SendDlgItemMessage(gHWND, IDC_PROGRESS, PBM_SETRANGE32, 0, 100);
 	SendDlgItemMessage(gHWND, IDC_PROGRESS, PBM_GETPOS, 0, 0);
-	UINT old = SendDlgItemMessage(gHWND, IDC_PROGRESS, PBM_GETPOS, 0, 0);
+	UINT old = (UINT)SendDlgItemMessage(gHWND, IDC_PROGRESS, PBM_GETPOS, 0, 0);
 	if(progress < old) {
 		SendDlgItemMessage(gHWND, IDC_PROGRESS, PBM_SETPOS, progress, 0);
 		SendMessage(progressbar, WM_PAINT, 0, 0);
@@ -132,7 +139,7 @@ int SetProgressBar(unsigned int progress)
 		while(progress > old) {
 			SendDlgItemMessage(gHWND, IDC_PROGRESS, PBM_SETPOS, old+1, 0);
 			SendDlgItemMessage(gHWND, IDC_PROGRESS, WM_PAINT, 0, 0);
-			old = SendDlgItemMessage(gHWND, IDC_PROGRESS, PBM_GETPOS, 0, 0);
+			old = (UINT)SendDlgItemMessage(gHWND, IDC_PROGRESS, PBM_GETPOS, 0, 0);
 			Sleep(3);
 		}
 	}
@@ -140,12 +147,12 @@ int SetProgressBar(unsigned int progress)
 	return progress;
 }
 
-void DumpProcess(DWORD pid)
+bool DumpProcess(DWORD pid)
 {
 	gMemSnap = new MemorySnapshot;
-
 	char filename[1024];
 	OPENFILENAME ofln;
+
 	memset(&filename, 0, sizeof(filename));
 	memset(&ofln, 0, sizeof(OPENFILENAME));
 	ofln.lStructSize = sizeof(OPENFILENAME);
@@ -159,10 +166,9 @@ void DumpProcess(DWORD pid)
 	ofln.lpstrInitialDir = NULL;
 	ofln.lpstrDefExt = ".snap";
 	ofln.Flags = OFN_PATHMUSTEXIST | OFN_OVERWRITEPROMPT;
-
 	GetSaveFileName(&ofln);
 	CommDlgExtendedError();
-	gMemSnap->Dump(pid, filename);
+	return gMemSnap->Dump(pid, filename);
 }
 
 INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT message, WPARAM wParam, LPARAM lParam) 
@@ -192,8 +198,8 @@ INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT message, WPARAM wParam, LPARAM l
 					MemorySnapshot *gMemSnap = new MemorySnapshot;
 					char filename[MAX_PATH];
 					wsprintf(filename, "%S", szArglist[2]);
-					gMemSnap->Dump(atoi(szpid), filename);
-					SendMessage(hwndDlg, WM_CLOSE, IDC_DUMP, 0);
+					bool res = gMemSnap->Dump(atoi(szpid), filename);
+					SendMessage(hwndDlg, WM_CLOSE, IDC_DUMP, (LPARAM)res);
 				} else {
 					DumpProcess(atoi(szpid));
 				}
@@ -213,7 +219,7 @@ INT_PTR CALLBACK MainDlgProc(HWND hwndDlg, UINT message, WPARAM wParam, LPARAM l
 			delete gProcList;
 			gProcList = 0;
 			EndDialog(gHWND, 0);
-			ExitProcess(0);
+			ExitProcess((UINT)lParam);
 			break;
 
 		case WM_COMMAND:
