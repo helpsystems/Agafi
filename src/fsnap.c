@@ -126,13 +126,10 @@ void get_module_name ( char *fullname , char *name )
 
 ////////////////////////////////////////////////////////////////////////////////
 
-void *get_module_base ( char *filename )
+int is_windows_module ( char *filename )
 {
-  IMAGE_NT_HEADERS pe;
   char data [ 2 ];
-  void *real_module_base;
-  unsigned int pe_offset;
-  void *base = NULL;
+  int ret = FALSE;
   FILE *f;
 
 /* Abro el file */
@@ -147,25 +144,50 @@ void *get_module_base ( char *filename )
   /* Si es un "MZ" */
     if ( memcmp ( data , "MZ" , 2 ) == 0 )
     {
-    /* Me posiciono al PRINCIPIO del PE */
-      fseek ( f , 0x3c , SEEK_SET );
+    /* Retorno OK */
+      ret = TRUE;
+    }
 
-    /* Obtengo el puntero al PE */
-      fread ( &pe_offset , 1 , sizeof ( pe_offset ) , f );
+  /* Cierro el file */
+    fclose ( f );
+  }
 
-    /* Me posiciono al PRINCIPIO del HEADER del PE */
-      fseek ( f , pe_offset , SEEK_SET );
+  return ( ret );
+}
 
-    /* Obtengo el HEADER del PE */
-      fread ( &pe , 1 , sizeof ( IMAGE_NT_HEADERS ) , f );
+////////////////////////////////////////////////////////////////////////////////
 
-    /* Obtengo la BASE del modulo */
-      base = ( void * ) pe.OptionalHeader.ImageBase;
+void *get_module_base ( char *filename )
+{
+  IMAGE_NT_HEADERS pe;
+  unsigned int pe_offset;
+  void *base = NULL;
+  FILE *f;
+
+/* Si el modulo VALID */
+  if ( is_windows_module ( filename ) == TRUE )
+  {
+  /* Abro el file */
+    f = fopen ( filename , "rb" );
+
+  /* Me posiciono al PRINCIPIO del PE */
+    fseek ( f , 0x3c , SEEK_SET );
+
+  /* Obtengo el puntero al PE */
+    fread ( &pe_offset , 1 , sizeof ( pe_offset ) , f );
+
+  /* Me posiciono al PRINCIPIO del HEADER del PE */
+    fseek ( f , pe_offset , SEEK_SET );
+
+  /* Obtengo el HEADER del PE */
+    fread ( &pe , 1 , sizeof ( IMAGE_NT_HEADERS ) , f );
+
+  /* Obtengo la BASE del modulo */
+    base = ( void * ) pe.OptionalHeader.ImageBase;
 //      printf ( "BASE en %x\n" , base );
 
-    /* Cierro el file */
-      fclose ( f );
-    }
+  /* Cierro el file */
+    fclose ( f );
   }
 
   return ( base );
@@ -221,6 +243,30 @@ int is_loadable_module ( char *filename , int force_base , void **base_address )
 
       /* Retorno OK */
         ret = TRUE;
+      }
+    }
+  /* Si el FILE NO PUDO ser MAPEADO */
+    else
+    {
+    /* Si NO IMPORTA donde SE CARGA */
+      if ( force_base == FALSE )
+      {
+      /* Si es un modulo VALIDO */
+        if ( is_windows_module ( filename ) == TRUE )
+        {
+        /* Cargo el modulo DONDE PUEDO ( solo valido para OSs arcaicos ) */
+          module = LoadLibraryEx ( filename , NULL , DONT_RESOLVE_DLL_REFERENCE );
+
+        /* Si el MODULO pudo ser CARGADO */
+          if ( module != NULL )
+          {
+          /* Retorno la BASE del MODULO */
+            *base_address = ( void * ) module;
+
+          /* Retorno OK */
+            ret = TRUE;
+          }
+        }
       }
     }
   }
@@ -347,7 +393,7 @@ void create_snapshot ( char *file_to_dump , void *module_base , char *snapshot )
 
 /* Obtengo el nombre LIMPIO del modulo */
   get_module_name ( file_to_dump , module_name );
-//  printf ( "name: %s con size = %i\n" , module_name , strlen ( module_name ) ); 
+//  printf ( "name: %s con size = %i\n" , module_name , strlen ( module_name ) );
 
 /* Dumpeo TODAS las secciones en el file */
   dump_sections ( f , module_name , ( unsigned int ) module_base , ( unsigned int ) module_base + filelen );
@@ -407,6 +453,9 @@ int main ( int argc , char *argv [] )
 /* Chequeo los paramentros */
   if ( ( argc != 3 ) && ( argc != 4 ) )
   {
+    printf ( "\nfsnap v1.1\n" );
+    printf ( "Created by Nicolas A. Economou\n" );
+    printf ( "Core Security Technologies, Buenos Aires, Argentina (2015)\n" );
     printf ( "\nUse: fsnap input_file output_file [-force_base]\n" );
     return ( 0 );
   }

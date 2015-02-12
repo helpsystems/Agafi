@@ -49,6 +49,8 @@
 #define OP_REGS_TO_MEM        13
 #define OP_REG_TO_NOT_REG     20
 #define OP_REG_TO_NEG_REG     21
+#define OP_REG_INCREMENTOR    22
+#define OP_MEM_TO_ALL_REGS    24
 
 #define READABLE              1
 #define WRITABLE              2
@@ -74,9 +76,11 @@ typedef struct
   unsigned int offset_limit;
   int stack_pivoting;
   int negator;
+  int negator_by_incrementation;
+  int neg_operation;
   int ending_type;
   int stack_used;
-  int stack_requiered;
+  int stack_required;
   int ret_extra_consumption;
   int stack_padding;
   int multiple_asignations;
@@ -129,6 +133,30 @@ typedef struct
 ////////////////////////////////////////////////////////////////////////////////
 
 char *registers [] = {"eax","ecx","edx","ebx","esp","ebp","esi","edi","eip"};
+
+////////////////////////////////////////////////////////////////////////////////
+
+void delete_new_line ( char *line )
+{
+  char *s;
+
+/* Apunto al inicio del string */
+  s = line;
+
+/* Mientras haya caracteres */
+  while ( *s != 0 )
+  {
+  /* Si es un "\r" o "\n" */
+    if ( ( *s == '\r' ) || ( *s == '\n' ) )
+    {
+    /* Lo reemplazo por un CERO */
+      *s = 0;
+    }
+
+  /* Avanzo en el string */
+    s ++;
+  }
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -311,7 +339,7 @@ int get_operation_type ( char *line , GADGET *gadget )
     gadget -> operation = OP_MEM_TO_REG;
 
   /* MINIMO STACK REQUERIDO */
-    gadget -> stack_requiered = 4;
+    gadget -> stack_required = 4;
   }
 /* Si es un "MOV REG32,[REG32+0x00]/RET" */
   else if ( strstr ( line , "=[" ) != NULL )
@@ -345,6 +373,18 @@ int get_operation_type ( char *line , GADGET *gadget )
     {
     /* Seteo el TIPO de OPERACION */
       gadget -> operation = OP_REG_TO_NEG_REG;
+    }
+  /* Si el VALOR ASIGNADO es el 0x1111111e INCREMENTANDO en 1 */
+    else if ( strstr ( line , "0x1111111f" ) != NULL )
+    {
+    /* Obtengo el REGISTRO que queda en el TOPE del STACK */
+      s = strtok ( line , "=" );
+
+    /* Seteo el REGISTRO USADO */
+      gadget -> register_index = get_register_index ( s );
+
+    /* Seteo el TIPO de OPERACION */
+      gadget -> operation = OP_REG_INCREMENTOR;
     }
   }
 /* Si es un "REG32=REG32" */
@@ -526,11 +566,23 @@ char *get_gadget_pseudo_instruction ( GADGET *gadget )
   /* Armo la instruccion */
     sprintf ( instruction , get_pushad_ret_type ( gadget ) );
   }
-/* Si es un "NEG-NOT/RET" */
-  else if ( gadget -> operation == OP_REG_TO_NEG_REG || gadget -> operation == OP_REG_TO_NOT_REG )
+/* Si es un "NEG/RET" */
+  else if ( gadget -> operation == OP_REG_TO_NEG_REG )
+  {
+  /* Armo la instruccion */
+    sprintf ( instruction , "\"neg %s/ret\"" , registers [ gadget -> register_index ] );
+  }
+/* Si es un "NOT/RET" */
+  else if ( gadget -> operation == OP_REG_TO_NOT_REG )
   {
   /* Armo la instruccion */
     sprintf ( instruction , "\"not %s/ret\"" , registers [ gadget -> register_index ] );
+  }
+/* Si es un "INC/RET" */
+  else if ( gadget -> operation == OP_REG_INCREMENTOR )
+  {
+  /* Armo la instruccion */
+    sprintf ( instruction , "\"inc %s/ret\"" , registers [ gadget -> register_index ] );
   }
 
 /* Alloco memoria */
@@ -833,6 +885,66 @@ int is_perfect_preserver ( GADGET *gadget , int register_set )
 
 ////////////////////////////////////////////////////////////////////////////////
 
+void decompose_gadget ( GADGET *super_gadget , List &gadgets )
+{
+  GADGET *gadget;
+  unsigned int cont;
+
+/* Recorro TODOS los GADGETS que lo COMPONEN */
+  for ( cont = 0 ; cont < super_gadget -> gadgets -> Len () ; cont ++ )
+  {
+  /* Levanto el SIGUIENTE GADGET */
+    gadget = ( GADGET * ) super_gadget -> gadgets -> Get ( cont );
+
+  /* Si es un GADGET SIMPLE */
+    if ( gadget -> is_super_gadget == FALSE )
+    {
+    /* Agrego el GADGET a la LISTA LINEAL */
+      gadgets.Add ( ( void * ) gadget );
+    }
+  /* Si es un SUPER-GADGET */
+    else
+    {
+    /* Obtengo TODOS los GADGETS del SUPER-GADGET */
+      decompose_gadget ( gadget , gadgets );
+    }
+  }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+void get_simple_gadgets ( List &rop_chain , List &simple_gadgets )
+{
+  List gadgets;
+  GADGET *gadget;
+  unsigned int cont;
+
+/* Limpio la lista a generar */
+  simple_gadgets.Clear ();
+
+/* Recorro TODOS los GADGETS del ROP-CHAIN */
+  for ( cont = 0 ; cont < rop_chain.Len () ; cont ++ )
+  {
+  /* Levanto el SIGUIENTE GADGET */
+    gadget = ( GADGET * ) rop_chain.Get ( cont );
+
+  /* Si es un GADGET SIMPLE */
+    if ( gadget -> is_super_gadget == FALSE )
+    {
+    /* Agrego el GADGET a la LISTA LINEAL */
+      simple_gadgets.Add ( ( void * ) gadget );
+    }
+  /* Si es un SUPER-GADGET */
+    else
+    {
+    /* Obtengo TODOS los GADGETS que lo COMPONEN */
+      decompose_gadget ( gadget , simple_gadgets );
+    }
+  }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
 GADGET *create_super_mov_reg32_reg32_gadget ( unsigned int dst_register , unsigned int src_register , List &gadgets )
 {
   GADGET *gadget;
@@ -943,7 +1055,8 @@ GADGET *create_super_pop_reg32_gadget ( unsigned int dst_register , List &gadget
 GADGET *create_super_negator_pop_reg32_gadget ( unsigned int dst_register , List &gadgets )
 {
   int negator_operator = OP_MEM_TO_REG;
-  List final_gadgets;
+  List simple_gadgets;
+  GADGET *simple_gadget;
   GADGET *gadget;
   unsigned int cont;
 
@@ -963,13 +1076,6 @@ GADGET *create_super_negator_pop_reg32_gadget ( unsigned int dst_register , List
 /* Seteo los REGISTROS PRESERVADOS */
   set_preserved_registers ( gadget , gadgets );
 
-//  for ( cont = 0 ; cont < VALID_REGISTERS ; cont ++ )
-//  {
-//    printf ( "%i " , gadget -> preserved_registers [ cont ] );
-//  }
-//
-//  printf ( "\n" );
-
 /* Seteo el STACK USADO */
   set_stack_used ( gadget , gadgets );
 //  printf ( "stack usado = %i\n" , gadget -> stack_used );
@@ -979,6 +1085,35 @@ GADGET *create_super_negator_pop_reg32_gadget ( unsigned int dst_register , List
 
 /* Agrego los GADGETS que lo COMPONEN */
   gadget -> gadgets -> Append ( gadgets );
+
+/* Obtengo TODOS los GADGETS que lo COMPONEN */
+  decompose_gadget ( gadget , simple_gadgets );
+
+/* Recorro TODOS los GADGETS que lo COMPONEN */
+  for ( cont = 0 ; cont < simple_gadgets.Len () ; cont ++ )
+  {
+  /* Levanto el SIGUIENTE GADGET */
+    simple_gadget = ( GADGET * ) simple_gadgets.Get ( cont );
+
+  /* Si el GADGET es un NEGADOR */
+    if ( simple_gadget -> operation == OP_REG_TO_NEG_REG )
+    {
+    /* Seteo la OPERACION NEGADORA en el SUPER-GADGET */
+      gadget -> neg_operation = simple_gadget -> operation;
+
+    /* Dejo de buscar */
+      break;
+    }
+  /* Si el GADGET es un NOTEADOR */
+    else if ( simple_gadget -> operation == OP_REG_TO_NOT_REG )
+    {
+    /* Seteo la OPERACION NEGADORA en el SUPER-GADGET */
+      gadget -> neg_operation = simple_gadget -> operation;
+
+    /* Dejo de buscar */
+      break;
+    }
+  }
 
   return ( gadget );
 }
@@ -1040,6 +1175,7 @@ GADGET *create_super_bypasser_gadget ( GADGET *bypass1 , GADGET *gadget_to_bypas
 
 /* Transfiero los SETEOS especiales */
   gadget -> negator = gadget_to_bypass -> negator;
+  gadget -> neg_operation = gadget_to_bypass -> neg_operation;
   gadget -> is_special_gadget = gadget_to_bypass -> is_special_gadget;
 
 /* Seteo el FLAG de GADGET COMPUESTO */
@@ -1372,12 +1508,6 @@ int get_gadgets ( char *binary_output , void *module_base , void *real_module_ba
   /* Cierro el file */
     fclose ( f );
   }
-/* Salgo con ERROR */
-  else
-  {
-    printf ( "[ ] Error: Invalid binary file\n" );
-    exit ( FALSE );
-  }
 
 /* Si HAY GADGETS */
   if ( ret == TRUE )
@@ -1484,7 +1614,7 @@ int get_gadgets ( char *binary_output , void *module_base , void *real_module_ba
       }
 
     /* Calculo el PADDING a setear */
-      gadget -> stack_padding = gadget -> stack_used - gadget -> stack_requiered - gadget -> ret_extra_consumption - ret_consumption;
+      gadget -> stack_padding = gadget -> stack_used - gadget -> stack_required - gadget -> ret_extra_consumption - ret_consumption;
     }
 
   /* Recorro TODOS los GADGETS encontrados */
@@ -1499,25 +1629,32 @@ int get_gadgets ( char *binary_output , void *module_base , void *real_module_ba
       /* Recorro TODAS las ASIGNACIONES */
         for ( cont2 = 0 ; cont2 < VALID_REGISTERS ; cont2 ++ )
         {
-        /* Si hay una ASIGNACION VALIDA */
-          if ( gadget -> asignated_registers [ cont2 ] != -1 )
+        /* Si es una ASIGNACION DOBLE ("xchg") */
+          if ( gadget -> operation == OP_REGS_TO_REGS )
           {
-          /* Creo un GADGET con una ASIGNACION SIMPLE */
-            gadget2 = create_gadget ();
+          /* Si hay una ASIGNACION VALIDA */
+            if ( gadget -> asignated_registers [ cont2 ] != -1 )
+            {
+            /* Creo un GADGET con una ASIGNACION SIMPLE */
+              gadget2 = create_gadget ();
 
-          /* Asigno los valores del GADGET ORIGINAL */
-            *gadget2 = *gadget;
+            /* Asigno los valores del GADGET ORIGINAL */
+              *gadget2 = *gadget;
 
-          /* Seteo la ASIGNACION DEL GADGET */
-            gadget2 -> register_index = cont2;
-            gadget2 -> operand = gadget -> asignated_registers [ cont2 ];
-
-          /* Seteo el GADGET como SIMPLE ASIGNACION */
-            gadget2 -> multiple_asignations = FALSE;
-
-          /* Agrego el GADGET a la lista TEMPORAL */
-            new_simple_gadgets.Add ( ( void * ) gadget2 );
+            /* Seteo la ASIGNACION DEL GADGET */
+              gadget2 -> register_index = cont2;
+              gadget2 -> operand = gadget -> asignated_registers [ cont2 ];
+        
+            /* Seteo el TIPO de OPERACION */
+//            printf ( "SETEAR TIPO DE OPERACION\n" );
+            }
           }
+
+         /* Seteo el GADGET como SIMPLE ASIGNACION */
+          gadget2 -> multiple_asignations = FALSE;
+
+        /* Agrego el GADGET a la lista TEMPORAL */
+          new_simple_gadgets.Add ( ( void * ) gadget2 );
         }
       }
     }
@@ -1600,6 +1737,10 @@ int get_negator_rets ( int new_search , void *module_base , void *real_module_ba
     /* Creo el file donde va el OBJETIVO de BUSQUEDA */
       sprintf ( cmd , "echo # finding ... > %s" , objective );
       system ( cmd );
+
+    /* Seteo las EFLAGS para BAJAR el TIEMPO de BUSQUEDA */
+      sprintf ( cmd , "echo eflags = 0x202 >> %s" , objective );
+      system ( cmd );
     }
 
   /* Pongo el OBJETIVO */
@@ -1615,6 +1756,60 @@ int get_negator_rets ( int new_search , void *module_base , void *real_module_ba
 
 /* Parseo la salida */
   get_gadgets ( txtfile , module_base , real_module_base , invalid_chars , negator_rets );
+
+  return ( ret );
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+int get_incrementor_rets ( int new_search , void *module_base , void *real_module_base , char *settings , char *snapshot , List &invalid_chars , List &incrementor_rets )
+{
+  char *objective = "objectiveX.txt";
+  char txtfile [ 4096 ];
+  char cmd1 [ 4096 ];
+  char cmd2 [ 4096 ];
+  char cmd [ 4096 ];
+  int ret = TRUE;
+
+/* Armo el nombre de los files */
+  snprintf ( txtfile , sizeof ( txtfile ) , "%s.%s" , snapshot , "incrementor_rets.txt" );
+
+/* Si tengo que hacer una NUEVA BUSQUEDA */
+  if ( new_search == TRUE )
+  {
+  /* Si hay SETTINGS INICIALES */
+    if ( settings != NULL )
+    {
+    /* Genero el "OBJECTIVE.TXT" */
+      generate_file ( settings , objective );
+    }
+  /* Si NO hay SETTINGS */
+    else
+    {
+    /* Creo el file donde va el OBJETIVO de BUSQUEDA */
+      sprintf ( cmd , "echo # finding ... > %s" , objective );
+      system ( cmd );
+
+    /* Seteo las EFLAGS para BAJAR el TIEMPO de BUSQUEDA */
+      sprintf ( cmd , "echo eflags = 0x202 >> %s" , objective );
+      system ( cmd );
+    }
+
+  /* Pongo el OBJETIVO para EBX ( SIZE a DESPROTEGER ) */
+    sprintf ( cmd , "echo ebx=0x1111111e >> %s" , objective );
+    system ( cmd );
+    sprintf ( cmd , "echo ebx==0x1111111f >> %s" , objective );
+    system ( cmd );
+
+  /* Busco los GADGETS */
+    snprintf ( cmd , sizeof ( cmd ) , "agafi -s %s %s %s" , snapshot , objective , txtfile );
+    system ( cmd );
+  }
+
+/* Parseo la salida */
+  get_gadgets ( txtfile , module_base , real_module_base , invalid_chars , incrementor_rets );
+
+//  printf ( "INCREMENTORS ENCONTRADOS = %i\n" , incrementor_rets.Len () );
 
   return ( ret );
 }
@@ -1645,6 +1840,10 @@ int get_pushad_rets ( int new_search , void *module_base , void *real_module_bas
     {
     /* Creo el file donde va el OBJETIVO de BUSQUEDA */
       sprintf ( cmd , "echo # finding ... > %s" , objective );
+      system ( cmd );
+
+    /* Seteo las EFLAGS para BAJAR el TIEMPO de BUSQUEDA */
+      sprintf ( cmd , "echo eflags = 0x202 >> %s" , objective );
       system ( cmd );
     }
 
@@ -1689,6 +1888,10 @@ int get_pop_reg32_rets ( int new_search , void *module_base , void *real_module_
     {
     /* Creo el file donde va el OBJETIVO de BUSQUEDA */
       sprintf ( cmd , "echo # finding ... > %s" , objective );
+      system ( cmd );
+
+    /* Seteo las EFLAGS para BAJAR el TIEMPO de BUSQUEDA */
+      sprintf ( cmd , "echo eflags = 0x202 >> %s" , objective );
       system ( cmd );
     }
 
@@ -1926,66 +2129,6 @@ int get_negation_type ( GADGET *super_gadget )
   }
 
   return ( operation_type );
-}
-
-////////////////////////////////////////////////////////////////////////////////
-
-void decompose_gadget ( GADGET *super_gadget , List &gadgets )
-{
-  GADGET *gadget;
-  unsigned int cont;
-
-/* Recorro TODOS los GADGETS que lo COMPONEN */
-  for ( cont = 0 ; cont < super_gadget -> gadgets -> Len () ; cont ++ )
-  {
-  /* Levanto el SIGUIENTE GADGET */
-    gadget = ( GADGET * ) super_gadget -> gadgets -> Get ( cont );
-
-  /* Si es un GADGET SIMPLE */
-    if ( gadget -> is_super_gadget == FALSE )
-    {
-    /* Agrego el GADGET a la LISTA LINEAL */
-      gadgets.Add ( ( void * ) gadget );
-    }
-  /* Si es un SUPER-GADGET */
-    else
-    {
-    /* Obtengo TODOS los GADGETS del SUPER-GADGET */
-      decompose_gadget ( gadget , gadgets );
-    }
-  }
-}
-
-////////////////////////////////////////////////////////////////////////////////
-
-void get_simple_gadgets ( List &rop_chain , List &simple_gadgets )
-{
-  List gadgets;
-  GADGET *gadget;
-  unsigned int cont;
-
-/* Limpio la lista a generar */
-  simple_gadgets.Clear ();
-
-/* Recorro TODOS los GADGETS del ROP-CHAIN */
-  for ( cont = 0 ; cont < rop_chain.Len () ; cont ++ )
-  {
-  /* Levanto el SIGUIENTE GADGET */
-    gadget = ( GADGET * ) rop_chain.Get ( cont );
-
-  /* Si es un GADGET SIMPLE */
-    if ( gadget -> is_super_gadget == FALSE )
-    {
-    /* Agrego el GADGET a la LISTA LINEAL */
-      simple_gadgets.Add ( ( void * ) gadget );
-    }
-  /* Si es un SUPER-GADGET */
-    else
-    {
-    /* Obtengo TODOS los GADGETS que lo COMPONEN */
-      decompose_gadget ( gadget , simple_gadgets );
-    }
-  }
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -2654,6 +2797,52 @@ void add_super_negated_pop_reg32_rets ( List &pop_reg32_rets , List &mov_reg32_r
 
 ////////////////////////////////////////////////////////////////////////////////
 
+void add_super_incrementors_pop_reg32_rets ( List &pop_reg32_rets , List &incrementor_rets )
+{
+  List gadgets;
+  GADGET *incrementor_ret;
+  GADGET *pop_reg32_ret;
+  GADGET *super_gadget;
+  unsigned int cont, cont2;
+
+/* Recorro TODOS los GADGETS INCREMENTADORES */
+  for ( cont = 0 ; cont < incrementor_rets.Len () ; cont ++ )
+  {
+  /* Levanto el SIGUIENTE GADGET */
+    incrementor_ret = ( GADGET * ) incrementor_rets.Get ( cont );
+
+  /* Recorro TODOS los GADGETS POPEADORES */
+    for ( cont2 = 0 ; cont2 < pop_reg32_rets.Len () ; cont2 ++ )
+    {
+    /* POPEO el REGISTRO a INCREMENTAR */
+      pop_reg32_ret = ( GADGET * ) pop_reg32_rets.Get ( cont2 );
+
+    /* Si POPEA el REGISTRO INCREMENTADO */
+      if ( pop_reg32_ret -> register_index == incrementor_ret -> register_index )
+      {
+      /* Armo la lista de GADGETS que lo COMPONEN */
+        gadgets.Add ( ( void * ) pop_reg32_ret );
+        gadgets.Add ( ( void * ) incrementor_ret );
+        gadgets.Add ( ( void * ) incrementor_ret );
+
+      /* Creo un SUPER-GADGET */
+        super_gadget = create_super_negator_pop_reg32_gadget ( pop_reg32_ret -> register_index , gadgets );
+
+      /* Marco al GADGET como NEGADO por INCREMENTACION */
+        super_gadget -> negator_by_incrementation = TRUE;
+
+      /* Agrego el GADGET a la LISTA */
+        pop_reg32_rets.Add ( ( void * ) super_gadget );
+
+      /* Dejo de buscar */
+        return;
+      }
+    }
+  }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
 int get_mov_reg32_reg32_rets ( int new_search , void *module_base , void *real_module_base , char *settings , char *snapshot , List &invalid_chars , List &mov_reg32_reg32_rets )
 {
   List super_mov_reg32_reg32_rets;
@@ -2680,6 +2869,10 @@ int get_mov_reg32_reg32_rets ( int new_search , void *module_base , void *real_m
     {
     /* Creo el file donde va el OBJETIVO de BUSQUEDA */
       sprintf ( cmd , "echo # finding ... > %s" , objective );
+      system ( cmd );
+
+    /* Seteo las EFLAGS para BAJAR el TIEMPO de BUSQUEDA */
+      sprintf ( cmd , "echo eflags = 0x202 >> %s" , objective );
       system ( cmd );
     }
 
@@ -2742,6 +2935,10 @@ int get_mov_reg32_creg32_rets ( int new_search , void *module_base , void *real_
       /* Creo el file donde va el OBJETIVO de BUSQUEDA */
         sprintf ( cmd , "echo # finding ... > %s" , objective );
         system ( cmd );
+
+      /* Seteo las EFLAGS para BAJAR el TIEMPO de BUSQUEDA */
+        sprintf ( cmd , "echo eflags = 0x202 >> %s" , objective );
+        system ( cmd );
       }
 
     /* Pongo el OBJETIVO */
@@ -2791,6 +2988,10 @@ int get_jmp_esps ( int new_search , void *module_base , void *real_module_base ,
     /* Creo el file donde va el OBJETIVO de BUSQUEDA */
       sprintf ( cmd , "echo # finding ... > %s" , objective );
       system ( cmd );
+
+    /* Seteo las EFLAGS para BAJAR el TIEMPO de BUSQUEDA */
+      sprintf ( cmd , "echo eflags = 0x202 >> %s" , objective );
+      system ( cmd );
     }
 
   /* Pongo el OBJETIVO */
@@ -2831,6 +3032,123 @@ void depure_gadget_list ( List &gadgets )
       cont --;
     }
   }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+int sort_incrementor_rets ( List &incrementor_rets )
+{
+  GADGET *gadget;
+  List scores;
+  unsigned int cont;
+  unsigned int cont2;
+  unsigned int score;
+  int invalid_gadget;
+  int ret = TRUE;
+
+/* Recorro TODOS los GADGETS ENCONTRADOS */
+  for ( cont = 0 ; cont < incrementor_rets.Len () ; cont ++ )
+  {
+  /* Levanto el siguiente GADGET */
+    gadget = ( GADGET * ) incrementor_rets.Get ( cont );
+
+  /* Puntaje por DEFAULT */
+    score = 0;
+
+  /* Por si TIENE algo que NO ME PERMITE USARLO */
+    invalid_gadget = FALSE;
+
+  /* Si NO usa JUMP CONDICIONALES */
+    if ( gadget -> conditional_jumps == 0 )
+    {
+    /* Si usa un RET comun */
+      if ( gadget -> ending_type == RET_ENDING )
+      {
+      /* Incremento el PUNTAJE */
+        score += 400000;
+      }
+    /* Si usa un RETN */
+      else if ( gadget -> ending_type == RETN_ENDING )
+      {
+      /* Incremento el PUNTAJE */
+        score += 300000;
+      }
+    }
+
+  /* Si obtuvo ALGUN PUNTAJE */
+    if ( score > 0 )
+    {
+    /* Recorro todos los REGISTROS PRESERVADOS */
+      for ( cont2 = 0 ; cont2 < VALID_REGISTERS ; cont2 ++ )
+      {
+      /* Si este registro ESTA PRESERVADO */
+        if ( gadget -> preserved_registers [ cont2 ] == TRUE )
+        {
+        /* Le sumo un PLUS */
+          score += 1000;
+        }
+      }
+    }
+
+  /* Si NO obtuvo NINGUN PUNTAJE */
+    if ( score == 0 )
+    {
+    /* Si NO usa JUMP CONDICIONALES */
+      if ( gadget -> conditional_jumps == 0 )
+      {
+      /* Le doy PRIORIDAD a los GADGETS que NO usan JUMP CONDICIONALES */
+        score += 100;
+      }
+    }
+
+  /* Si el GADGET tienen PUNTAJE */
+    if ( score > 0 )
+    {
+    /* Lo PREMIO si usa MENOS INSTRUCCIONES */
+      score += ( 100 - gadget -> instructions -> Len () );
+    }
+
+  /* Si NO termina con un "RET" o un "RETN" */
+    if ( ( gadget -> ending_type != RET_ENDING ) && ( gadget -> ending_type != RETN_ENDING ) )
+    {
+    /* NO puedo usar este gadget */
+      invalid_gadget = TRUE;
+    }
+
+  /* Si el GADGET es INVALIDO */
+    if ( invalid_gadget == TRUE )
+    {
+    /* NO lo voy a USAR */
+      score = 0;
+    }
+
+  /* Puntaje asignado al GADGET */
+    scores.Add ( ( void * ) ~ score );
+
+  /* Seteo el PUNTAJE al GADGET */
+    gadget -> score = score;
+  }
+
+/* Ordeno los gadgets en BASE al PUNTAJE */ 
+  scores.SortCouple ( incrementor_rets );
+
+/* Elimino los GADGETS que NO CALIFICAN */
+  depure_gadget_list ( incrementor_rets );
+
+/* Si hay ALGUN GADGET */
+  if ( incrementor_rets.Len () > 0 )
+  {
+  /* Obtengo el MEJOR gadget */
+    gadget = ( GADGET * ) incrementor_rets.Get ( 0 );
+
+  /* Elimino TODOS los DEMAS */
+    incrementor_rets.Clear ();
+
+  /* Retorno el MEJOR */
+    incrementor_rets.Add ( ( void * ) gadget );
+  }
+
+  return ( ret );
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -3828,6 +4146,7 @@ int get_pushad_ret_rop_chain ( int special_register , int use_special_register ,
   {
   /* Levanto el siguiente "PUSHAD/RET" */
     gadget = ( GADGET * ) pushad_rets.Get ( cont );
+//    printf ( "SCORE: %i\n" , gadget -> score );
 
   /* Si este tipo de "PUSHAD/RET" no fue TESTEADO */
     if ( gadget_endings.Find ( ( void * ) gadget -> ending_type ) == FALSE )
@@ -3954,7 +4273,7 @@ int get_pushad_ret_rop_chain ( int special_register , int use_special_register ,
 
 ////////////////////////////////////////////////////////////////////////////////
 
-GADGET *get_super_jmp_esp ( List &pushad_rets , List &pop_reg32_rets )
+GADGET *get_super_jmp_esp ( List &pushad_rets , List &pop_reg32_rets , void *ret_nop_address )
 {
   List jmp_esp_rop_chain;
   List registers_to_preserve;
@@ -3964,7 +4283,6 @@ GADGET *get_super_jmp_esp ( List &pushad_rets , List &pop_reg32_rets )
   GADGET *super_gadget = NULL;
   GADGET *final_gadget;
   GADGET *gadget;
-  void *ret_nop_address;
   unsigned int cont;
   int ret;
 
@@ -3994,18 +4312,18 @@ GADGET *get_super_jmp_esp ( List &pushad_rets , List &pop_reg32_rets )
   /* Obtengo el "PUSHAD/RET" ( ULTIMO GADGET ) */
     final_gadget = ( GADGET * ) jmp_esp_rop_chain.Get ( jmp_esp_rop_chain.Len () - 1 );
 
-  /* Si el "PUSHAD/RET" termina con un "RET" comun */
-    if ( final_gadget -> ending_type == RET_ENDING )
-    {
-    /* Uso al ULTIMO INSTRUCCION como un "RET NOP" */
-      ret_nop_address = final_gadget -> addresses -> Get ( final_gadget -> addresses -> Len () - 1 );
-    }
-  /* Si el "PUSHAD/RET" termina con otro "RET" */
-    else
-    {
-    /* Tengo que buscar un RET en los GADGET DISPONIBLES */
-      ret_nop_address = ( void * ) 0x33333333;
-    }
+//  /* Si el "PUSHAD/RET" termina con un "RET" comun */
+//    if ( final_gadget -> ending_type == RET_ENDING )
+//    {
+//    /* Uso al ULTIMO INSTRUCCION como un "RET NOP" */
+//      ret_nop_address = final_gadget -> addresses -> Get ( final_gadget -> addresses -> Len () - 1 );
+//    }
+//  /* Si el "PUSHAD/RET" termina con otro "RET" */
+//    else
+//    {
+//    /* Tengo que buscar un RET en los GADGET DISPONIBLES */
+//      ret_nop_address = ( void * ) 0x33333333;
+//    }
 
   /* Imprimo los GADGETS usados */
     for ( cont = 0 ; cont < jmp_esp_rop_chain.Len () - 1 ; cont ++ )
@@ -4067,7 +4385,7 @@ GADGET *get_super_jmp_esp ( List &pushad_rets , List &pop_reg32_rets )
 
 ////////////////////////////////////////////////////////////////////////////////
 
-int find_iat_rop_chains ( void *vp_address , List &pop_reg32_rets , List &mov_reg32_reg32_rets , List &mov_reg32_creg32_rets , List &esi_sub_rop_chain , List &edi_sub_rop_chain )
+int find_iat_rop_chains ( void *vp_address , List &invalid_chars , List &pop_reg32_rets , List &mov_reg32_reg32_rets , List &mov_reg32_creg32_rets , List &esi_sub_rop_chain , List &edi_sub_rop_chain )
 {
   List rop_chain;
   GADGET *mov_reg32_creg32_ret;
@@ -4079,7 +4397,15 @@ int find_iat_rop_chains ( void *vp_address , List &pop_reg32_rets , List &mov_re
   unsigned int edi_solutions = 0;
   unsigned int score;
   unsigned int cont, cont2, cont3;
+  int vp_address_has_invalid_chars = FALSE;
   int ret = FALSE;
+
+/* Si la direccion de "IAT.VirtualProtect" tiene INVALID CHARS */
+  if ( has_invalid_chars ( invalid_chars , vp_address ) == TRUE )
+  {
+  /* Solo uso "POPs NEGADORES" */
+    vp_address_has_invalid_chars = TRUE;
+  }
 
 /* Recorro TODOS los "REG1=[REG2+0x00]" */
   for ( cont = 0 ; cont < mov_reg32_creg32_rets.Len () ; cont ++ )
@@ -4095,7 +4421,7 @@ int find_iat_rop_chains ( void *vp_address , List &pop_reg32_rets , List &mov_re
       continue;
     }
 
-  /* Recorro TODOS los "REG32=[ESP+0x00]" */
+  /* Recorro TODOS los "POP REG32" */
     for ( cont2 = 0 ; cont2 < pop_reg32_rets.Len () ; cont2 ++ )
     {
     /* Levanto el siguiente GADGET */
@@ -4106,6 +4432,45 @@ int find_iat_rop_chains ( void *vp_address , List &pop_reg32_rets , List &mov_re
       {
       /* Sigo buscando */
         continue;
+      }
+
+    /* Si "IAT.VirtualProtect" tiene INVALID CHARS */
+      if ( vp_address_has_invalid_chars == TRUE )
+      {
+      /* Si el gadget NO ES NEGADOR */
+        if ( pop_reg32_ret -> negator == FALSE )
+        {
+        /* Sigo buscando */
+          continue;
+        }
+
+      /* Si el GADGET NIEGA por INCREMENTACION */
+        if ( pop_reg32_ret -> negator_by_incrementation == TRUE )
+        {
+        /* Sigo buscando */
+          continue;
+        }
+
+      /* Si es un GADGET que usa NEG */
+        if ( pop_reg32_ret -> neg_operation == OP_REG_TO_NEG_REG )
+        {
+        /* Si el valor NEGADO tiene INVALID CHARS */
+          if ( has_invalid_chars ( invalid_chars , ( void * ) ( - ( int ) vp_address ) ) == TRUE )
+          {
+          /* Sigo buscando */
+            continue;
+          }
+        }
+      /* Si es un GADGET que usa NOT */
+        else if ( pop_reg32_ret -> neg_operation == OP_REG_TO_NOT_REG )
+        {
+        /* Si el valor NOTEADO tiene INVALID CHARS */
+          if ( has_invalid_chars ( invalid_chars , ( void * ) ( ~ ( int ) vp_address ) ) == TRUE )
+          {
+          /* Sigo buscando */
+            continue;
+          }
+        }
       }
 
     /* Si este GADGET saca del STACK el REGISTRO que NECESITO */
@@ -4364,6 +4729,7 @@ int find_direct_gadgets ( void *vp_address , List &invalid_chars , List &esi_sub
   /* Obtengo TODOS los BYPASSES para este GADGET */
 //    printf ( "[x] Buscando BYPASSES ...\n" );
     get_super_bypasses ( special_gadget , mov_reg32_reg32_rets , super_bypasses );
+//    printf ( "bypasses = %i\n" , super_bypasses.Len () );
 
   /* Agrego los NUEVOS "POP REG32" a la lista */
     pop_reg32_rets.Append ( super_bypasses );
@@ -4404,13 +4770,6 @@ int find_direct_gadgets ( void *vp_address , List &invalid_chars , List &esi_sub
     /* Tengo que NEGAR tanto el SIZE como el PROTECTION */
       registers_to_negate.Add ( ( void * ) EBX_REGISTER );
       registers_to_negate.Add ( ( void * ) EDX_REGISTER );
-    }
-
-  /* Si el 0x4 es INVALID CHAR */
-    if ( invalid_chars.Find ( ( void * ) 0x4 ) == TRUE )
-    {
-    /* Tengo que NEGAR tanto el SIZE como el PROTECTION */
-      registers_to_negate.Add ( ( void * ) EBX_REGISTER );
     }
 
   /* Si el 0x40 es INVALID CHAR */
@@ -4628,6 +4987,9 @@ char *get_next_line ( char *settings )
   /* Levanto la siguiente linea */
     if ( fgets ( line , sizeof ( line ) , f ) != 0 )
     {
+    /* Elimino el ENTER al final */
+      delete_new_line ( line );
+
     /* Elimino TODOS los espacios de la linea */
       compress_line ( line );
 
@@ -4673,6 +5035,34 @@ int get_values ( char *line , List &values )
 
 ////////////////////////////////////////////////////////////////////////////////
 
+int get_modules ( char *line , List &modules )
+{
+  unsigned int value;
+  char *module;
+  char *s;
+  int ret = TRUE;
+
+/* Mientras haya asignaciones */
+  while ( ( s = strtok ( line , "," ) ) != NULL )
+  {
+  /* Creo un string */
+    module = ( char * ) malloc ( strlen ( s ) + 1 );
+
+  /* Obtengo el valor de esta asignacion */
+    strcpy ( module , s );
+
+  /* Agrego el valor a la lista */
+    modules.Add ( ( void * ) module );
+
+  /* Para NO volver a parsear desde el INICIO */
+    line = NULL;
+  }
+
+  return ( ret );
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
 int is_valid_settings ( char *settings )
 {
   char *line;
@@ -4698,10 +5088,10 @@ int is_valid_settings ( char *settings )
 
 ////////////////////////////////////////////////////////////////////////////////
 
-void get_invalid_chars ( char *settings , List &invalid_chars )
+int get_invalid_chars ( char *settings , List &invalid_chars )
 {
-  char invalid_char_line [ 1024 ];
   char *line;
+  int ret = FALSE;
 
 /* Recorro linea por linea */
   while ( ( line = get_next_line ( settings ) ) != NULL )
@@ -4715,6 +5105,9 @@ void get_invalid_chars ( char *settings , List &invalid_chars )
       /* Obtengo un puntero a los INVALID CHARS */
         line = strchr ( line , '=' );
 
+      /* Retorno OK */
+        ret = TRUE;
+
       /* Si el SIMBOLO EXISTE */
         if ( line != NULL )
         {
@@ -4724,6 +5117,8 @@ void get_invalid_chars ( char *settings , List &invalid_chars )
       }
     }
   }
+
+  return ( ret );
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -4749,6 +5144,46 @@ void *get_valid_address ( void *base , unsigned int size , List &invalid_chars )
   }
 
   return ( waddress );
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+void *get_ret_nop ( List &gadgets , List &invalid_chars )
+{
+  void *ret_nop_address = NULL;
+  void *ret_address;
+  unsigned int cont;
+  GADGET *gadget;
+
+/* Recorro TODOS los GADGETS */
+  for ( cont = 0 ; cont < gadgets.Len () ; cont ++ )
+  {
+  /* Levanto el SIGUIENTE GADGET */
+    gadget = ( GADGET * ) gadgets.Get ( cont );
+
+  /* Si es un GADGET SIMPLE */
+    if ( gadget -> is_super_gadget == FALSE )
+    {
+    /* Si el GADGET termina en un RET COMUN */
+      if ( gadget -> ending_type == RET_ENDING )
+      {
+      /* Obtengo la direccion del RET */
+        ret_address = gadget -> addresses -> Get ( gadget -> addresses -> Len () - 1 );
+
+      /* Si la direccion NO TIENE INVALID CHARS */
+        if ( has_invalid_chars ( invalid_chars , ret_address ) == FALSE )
+        {
+        /* Retorno esta direccion */
+          ret_nop_address = ret_address;
+
+        /* Dejo de buscar */
+          break;
+        }
+      }
+    }
+  }
+
+  return ( ret_nop_address );
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -4853,7 +5288,7 @@ int get_module_name ( char *snapshot , char *module_name )
 
 ////////////////////////////////////////////////////////////////////////////////
 
-int get_modules_without_aslr ( char *snapshot_file , List &modules )
+int get_loaded_modules ( char *snapshot_file , List &modules )
 {
   SNAPSHOT_HEADER header;
   DUMPBLOCKV20 block;
@@ -4867,6 +5302,216 @@ int get_modules_without_aslr ( char *snapshot_file , List &modules )
   void *allocated_module = NULL;
   void *data;
   int ret = FALSE;
+  int res;
+  FILE *f;
+
+/* Abro el file pasado como parametro */
+  f = fopen ( snapshot_file , "rb" );
+
+/* Si pude abrir el file */
+  if ( f != NULL )
+  {
+  /* Levanto el HEADER */
+    res = fread ( &header , sizeof ( header ) , 1 , f );
+
+//    printf ( "secciones = %i\n" , header.blockcount );
+//    printf ( "sizeof1 = %i\n" , sizeof ( header ) );
+//    printf ( "sizeof2 = %i\n" , sizeof ( block ) );
+
+//    header.blockcount = 1;
+
+  /* Si pude leer el header completo */
+    if ( res == 1 )
+    {
+    /* Si el header es INVALIDO */
+      if ( header.sig != 0x70616E73 )
+      {
+      /* Cierro el file */
+        fclose ( f );
+
+      /* Salgo con ERROR */
+        return ( FALSE );
+      }
+
+    /* Tag inicial */
+//      printf ( "\nProcessing snaphost file ...\n" );
+
+    /* Inicializo el campo con el nombre del modulo al que pertenece la SECCION */
+      strcpy ( block.name , "" );
+
+    /* Inicializo el string */
+      strcpy ( last_module , "" );
+
+    /* Levanto TODAS las SECCIONES del SNAPSHOT */
+      for ( cont = 0 ; cont < header.blockcount ; cont ++ )
+      {
+      /* Si es la version 1 de la estructura */
+        if ( header.version == 1 )
+        {
+        /* Levanto el header de la siguiente seccion */
+          res = fread ( &block , sizeof ( DUMPBLOCKV10 ) , 1 , f );
+        }
+      /* Si es la version con el nombre de la DLL */
+        else if ( header.version == 2 )
+        {
+        /* Levanto el header de la siguiente seccion */
+          res = fread ( &block , sizeof ( DUMPBLOCKV20 ) , 1 , f );
+        }
+      /* Si hay algun ERROR */
+        else
+        {
+        /* Salgo con ERROR */
+          return ( FALSE );
+        }
+
+      /* Si pude leer el HEADER del BLOQUE de MEMORIA */
+        if ( res == 1 )
+        {
+        /* Si PERTENECE a un MODULO */
+          if ( strlen ( block.name ) > 0 )
+          {
+          /* Si NO pertenece al MISMO MODULO */
+            if ( strcmp ( last_module , block.name ) != 0 )
+            {
+            /* Tengo un NUEVO MODULO */
+              strncpy ( last_module , block.name , sizeof ( block.name ) );
+
+            /* Creo un STRING para mantener el NOMBRE */
+              module_name = ( char * ) malloc ( strlen ( last_module ) + 1 );
+              strcpy ( module_name , last_module );
+
+            /* Agrego el NOMBRE a la lista */
+              modules.Add ( ( void * ) module_name );
+
+            /* Por ahora RETORNO OK */
+              ret = TRUE;
+            }
+          }
+
+        /* Mensaje al usuario */
+//          printf ( "* section: %.8I64x - %.8I64x %s %s\n" , block.BaseAddress , block.RegionSize , permisos , block.name );
+
+        /* Avanzo a la SIGUIENTE SECCION */
+          fseek ( f , block.RegionSize , SEEK_CUR );
+        }
+      /* Si hubo algun ERROR */
+        else
+        {
+        /* Salgo con ERROR */
+          return ( FALSE );
+        }
+      }
+    }
+
+  /* Cierro el file */
+    fclose ( f );
+  }
+
+  return ( ret );
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+int get_rop_module_list ( char *settings , char *snapshot , List &rop_module_list )
+{
+  List modules;
+  char module_list [ 1024 ];
+  char *module1;
+  char *module2;
+  char *line;
+  unsigned int cont, cont2;
+  int declaration_present = FALSE;
+  int module_found;
+  int ret = TRUE;
+
+/* Recorro linea por linea */
+  while ( ( line = get_next_line ( settings ) ) != NULL )
+  {
+  /* Si NO es un COMENTARIO */
+    if ( line [ 0 ] != '#' )
+    {
+    /* Si TENGO que BUSCAR */
+      if ( declaration_present == FALSE )
+      {
+      /* Si son los MODULOS donde ROPEAR */
+        if ( strstr ( line , "modules" ) != NULL )
+        {
+        /* Obtengo un puntero a los INVALID CHARS */
+          line = strchr ( line , '=' );
+
+        /* Para NO volver a buscar */
+          declaration_present = TRUE;
+
+        /* Si el SIMBOLO EXISTE */
+          if ( line != NULL )
+          {
+          /* Obtengo todos los MODULOS */
+            get_modules ( line + 1 , rop_module_list );
+          }
+        }
+      }
+    }
+  }
+
+/* Obtengo la LISTA de MODULOS CARGADOS en el SNAPSHOT */
+  get_loaded_modules ( snapshot , modules );
+
+/* Recorro TODOS los MODULOS pasados como parametro */
+  for ( cont = 0 ; cont < rop_module_list.Len () ; cont ++ )
+  {
+  /* Levanto el siguiente modulo */
+    module1 = ( char * ) rop_module_list.Get ( cont );
+
+  /* Inicializo una NUEVA BUSQUEDA */
+    module_found = FALSE;
+
+  /* Recorro TODOS los modulos en el SNAPSHOT */
+    for ( cont2 = 0 ; cont2 < modules.Len () ; cont2 ++ )
+    {
+    /* Levanto el siguiente modulo */
+      module2 = ( char * ) rop_module_list.Get ( cont2 );
+
+    /* Si el MODULO esta CARGADO */
+      if ( stricmp ( module1 , module2 ) == 0 )
+      {
+      /* Modulo encontrado */
+        module_found = TRUE;
+
+      /* Dejo de buscar */
+        break;
+      }
+    }
+
+  /* Si el modulo NO ESTA CARGADO */
+    if ( module_found == FALSE )
+    {
+    /* Mensaje de ERROR */
+      printf ( "[ ] Error: module '%s' not found in the process\n" , module1 );
+
+    /* Salgo con ERROR */
+      ret = FALSE;
+    }
+  }
+
+  return ( ret );
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+int get_modules_without_aslr ( char *snapshot_file , List &modules )
+{
+  SNAPSHOT_HEADER header;
+  DUMPBLOCKV20 block;
+  SECTION *section;
+  unsigned int cont;
+  char last_module [ sizeof ( block.name ) ];
+  char permisos [ 16 ];
+  char *module_name;
+  void *module_base_candidate = NULL;
+  unsigned int module_size = 0;
+  void *allocated_module = NULL;
+  void *data;
+  int ret = TRUE;
   int res;
   FILE *f;
 
@@ -4950,9 +5595,6 @@ int get_modules_without_aslr ( char *snapshot_file , List &modules )
 
               /* Agrego el NOMBRE a la lista */
                 modules.Add ( ( void * ) module_name );
-
-              /* Por ahora RETORNO OK */
-                ret = TRUE;
               }
             }
           }
@@ -4971,9 +5613,21 @@ int get_modules_without_aslr ( char *snapshot_file , List &modules )
         }
       }
     }
+  /* Si hubo algun PROBLEMA */
+    else
+    {
+    /* Salgo con ERROR */
+      ret = FALSE;
+    }
 
   /* Cierro el file */
     fclose ( f );
+  }
+/* Si el file NO EXISTE */
+  else
+  {
+  /* Salgo con ERROR */
+    ret = FALSE;
   }
 
   return ( ret );
@@ -5086,7 +5740,7 @@ int get_snapshoted_module ( char *snapshot_file , char *module_name , void **mod
             if ( res == 0 )
             {
             /* Salgo con ERROR */
-              printf ( "[ ] Error: Invalid snapshot\n" );
+              printf ( "[ ] Error: invalid snapshot\n" );
               exit ( 0 );
             }
 
@@ -5150,6 +5804,9 @@ int get_module_bases ( char *snapshot , char *module_name , void **snapshot_modu
   unsigned int pe_offset;
   int ret = TRUE;
   int res;
+
+/* Inicializo el puntero a retornar */
+  *real_module_base = NULL;
 
 /* Mapeo el SNAPSHOT */
   res = get_snapshoted_module ( snapshot , module_name , &module_virtual_address , ( void ** ) &module_base );
@@ -5404,12 +6061,13 @@ void *get_pointer_to_function_address ( char *snapshot , char *module_name , voi
 
 ////////////////////////////////////////////////////////////////////////////////
 
-void set_iat_pops_and_comments ( void *vp_address , List &gadgets , List &values_to_pop , List &comments )
+void set_iat_pops_and_comments ( void *vp_address , List &invalid_chars , List &gadgets , List &values_to_pop , List &comments )
 {
   unsigned int cont, cont2;
   void *value_to_pop;
   char *comment;
   GADGET *sub_gadget;
+  GADGET *next_gadget;
   GADGET *gadget;
   List sub_gadgets;
 
@@ -5439,11 +6097,50 @@ void set_iat_pops_and_comments ( void *vp_address , List &gadgets , List &values
     comment = ( char * ) NULL;
 
   /* Si es el PRIMER GADGET ( "POP IAT.VirtualProtect" ) */
-    if ( gadget -> operation == OP_MEM_TO_REG )
+    if ( cont == 0 )
     {
-    /* Agrego la DIRECCION de "VirtualProtect" en la IAT */
-      value_to_pop = vp_address;
-      comment = "IAT.VirtualProtect ADDRESS";
+    /* Si la direccion en la IAT NO tiene INVALID CHARS */
+      if ( has_invalid_chars ( invalid_chars , vp_address ) == FALSE )
+      {
+      /* Agrego la DIRECCION de "VirtualProtect" en la IAT */
+        value_to_pop = vp_address;
+        comment = "IAT.VirtualProtect ADDRESS";
+      }
+    /* Si la direccion en la IAT tiene INVALID CHARS */
+      else
+      {
+      /* Recorro TODOS los GADGETS RESTANTES */
+        for ( cont2 = cont + 1 ; cont2 < gadgets.Len () ; cont2 ++ )
+        {
+        /* Levanto el SIGUIENTE GADGET */
+          next_gadget = ( GADGET * ) gadgets.Get ( cont2 );
+
+        /* Si el gadget usa NEG */
+          if ( next_gadget -> operation == OP_REG_TO_NEG_REG )
+          {
+          /* Niego la direccion */
+            value_to_pop = ( void * ) ( - ( ( int ) vp_address ) );
+
+          /* Comentario a mostrar */
+            comment = "NEG (IAT.VirtualProtect ADDRESS)";
+
+          /* Dejo de buscar */
+            break;
+          }
+        /* Si el gadget usa NEG */
+          else if ( next_gadget -> operation == OP_REG_TO_NOT_REG )
+          {
+          /* Niego la direccion */
+            value_to_pop = ( void * ) ( ~ ( ( int ) vp_address ) );
+
+          /* Comentario a mostrar */
+            comment = "NOT (IAT.VirtualProtect ADDRESS)";
+
+          /* Dejo de buscar */
+            break;
+          }
+        }
+      }
     }
 
   /* Recorro TODOS los SUB-GADGETS que componen ESTE GADGET */
@@ -5472,7 +6169,7 @@ void set_iat_pops_and_comments ( void *vp_address , List &gadgets , List &values
 
 ////////////////////////////////////////////////////////////////////////////////
 
-void set_pushad_ret_pops_and_comments ( void *vp_address , void *data_section , unsigned int data_size , List &invalid_chars , GADGET *final_gadget , List &gadgets , List &values_to_pop , List &comments )
+void set_pushad_ret_pops_and_comments ( void *vp_address , void *data_section , unsigned int data_size , void *ret_nop_address , List &invalid_chars , GADGET *final_gadget , List &gadgets , List &values_to_pop , List &comments )
 {
   unsigned int cont, cont2;
   void *value_to_pop;
@@ -5498,7 +6195,7 @@ void set_pushad_ret_pops_and_comments ( void *vp_address , void *data_section , 
       iat_rop_chain.Append ( gadget -> gadgets );
 
     /* Seteo los COMENTARIOS de "IAT.VirtualProtect" */
-      set_iat_pops_and_comments ( vp_address , iat_rop_chain , values_to_pop , comments );
+      set_iat_pops_and_comments ( vp_address , invalid_chars , iat_rop_chain , values_to_pop , comments );
 
     /* Paso al siguiente */
       continue;
@@ -5533,7 +6230,8 @@ void set_pushad_ret_pops_and_comments ( void *vp_address , void *data_section , 
         if ( final_gadget -> ending_type == RET_ENDING )
         {
         /* Obtengo la direccion de la ultima instruccion del FINAL GADGET */
-          address = final_gadget -> addresses -> Get ( final_gadget -> addresses -> Len () - 1 );
+//          address = final_gadget -> addresses -> Get ( final_gadget -> addresses -> Len () - 1 );
+          address = ret_nop_address;
 
         /* Apunto al 'RET' del FINAL GADGET */
           value_to_pop = address; // Return to RET
@@ -5603,19 +6301,30 @@ void set_pushad_ret_pops_and_comments ( void *vp_address , void *data_section , 
           if ( get_negation_type ( gadget ) == OP_REG_TO_NOT_REG )
           {
           /* Valor a POPEAR */
-            value = ( void * ) ~ 0x4;  // REGION SIZE
+            value = ( void * ) ~ 0x1;  // REGION SIZE
           }
           else
           {
           /* Valor a POPEAR */
-            value = ( void * ) - 0x4;  // REGION SIZE
+            value = ( void * ) - 0x1;  // REGION SIZE
           }
         }
       /* Si NO es un INVALID CHAR */
         else
         {
-        /* Valor a POPEAR */
-          value = ( void * ) 0x4;  // REGION SIZE
+        /* Busco un SIZE que NO TENGA INVALID CHARS */
+          for ( cont2 = 1 ; cont2 <= 256 ; cont2 ++ )
+          {
+          /* Si este size NO TIENE INVALID CHARS */
+            if ( has_invalid_chars ( invalid_chars , ( void * ) cont2 ) == FALSE )
+            {
+            /* SIZE a POPEAR */
+              value = ( void * ) cont2;  // REGION SIZE
+
+            /* Dejo de buscar */
+              break;
+            }
+          }
         }
 
       /* Valor a POPEAR */
@@ -5692,7 +6401,7 @@ void set_pushad_ret_pops_and_comments ( void *vp_address , void *data_section , 
 
 ////////////////////////////////////////////////////////////////////////////////
 
-void set_jmp_esp_pops_and_comments ( List &gadgets , List &values_to_pop , List &comments )
+void set_jmp_esp_pops_and_comments ( List &gadgets , List &values_to_pop , List &comments , void *ret_nop_address )
 {
   GADGET *final_gadget;
   GADGET *sub_gadget;
@@ -5726,12 +6435,8 @@ void set_jmp_esp_pops_and_comments ( List &gadgets , List &values_to_pop , List 
     /* Obtengo el ULTIMO GADGET (PUSHAD/RET) */
       final_gadget = ( GADGET * ) sub_gadgets.Get ( sub_gadgets.Len () - 1 );
 
-    /* Si el GADGET FINAL termina en RET */
-      if ( final_gadget -> ending_type == RET_ENDING )
-      {
-      /* Obtengo la direccion de la ultima instruccion del FINAL GADGET */
-        address = final_gadget -> addresses -> Get ( final_gadget -> addresses -> Len () - 1 );
-      }
+    /* Return to RET */
+      address = ret_nop_address;
     }
 
   /* Recorro TODOS los SUB-GADGETS */
@@ -5795,17 +6500,8 @@ void set_jmp_esp_pops_and_comments ( List &gadgets , List &values_to_pop , List 
       /* Si es EBP */
         else if ( sub_gadget -> register_index == EBP_REGISTER )
         {
-        /* Si el GADGET FINAL termina en RET */
-          if ( final_gadget -> ending_type == RET_ENDING )
-          {
-          /* Apunto al 'RET' del FINAL GADGET */
-            value_to_pop = address; // Return to RET
-          }
-          else
-          { 
-          /* Uso el RET del MISMO gadget */
-            value_to_pop = gadget -> addresses -> Get ( gadget -> addresses -> Len () - 1 ); // "RET" address
-          }
+        /* Apunto al 'RET' del FINAL GADGET */
+          value_to_pop = address; // Return to RET
 
         /* Ultimo GADGET antes de SALTAR AL STACK */
           comment = "\"RET NOP --> JMP ESP\"";
@@ -5851,6 +6547,7 @@ int start_building_process ( int new_analysis , char *settings , char *snapshot 
   List comments;
   List invalid_chars;
   List module_list;
+  List incrementor_rets;
   GADGET *jmp_esp_gadget;
   GADGET *final_gadget;
   GADGET *gadget;
@@ -5858,6 +6555,7 @@ int start_building_process ( int new_analysis , char *settings , char *snapshot 
   char *last_instruction;
   char *comment;
   void *data_section_address = NULL;
+  void *ret_nop_address;
   void *real_module_base;
   void *module_base;
   void *vp_address;
@@ -5881,15 +6579,40 @@ int start_building_process ( int new_analysis , char *settings , char *snapshot 
 
 ///////////
 
-/* Obtengo la LISTA de MODULOS que NO tienen ASLR */
-  ret = get_modules_without_aslr ( snapshot , module_list );
+/* Obtengo la LISTA de MODULOS donde ROPear */
+  ret = get_rop_module_list ( settings , snapshot , module_list );
 
-/* Si TODOS los modulos TIENEN ASLR */
-  if ( module_list.Len () == 0 )
+/* Si hubo algun problema */
+  if ( ret == FALSE )
   {
   /* Mensaje al USUARIO */
-    printf ( " [ ] Error: ALL modules have ASLR\n" );
+    printf ( "[ ] Error: module list error\n" );
     return ( FALSE );
+  }
+
+///////////
+
+/* Si el USUARIO NO declaro MODULOS donde ROPear */
+  if ( module_list.Len () == 0 )
+  {
+  /* Obtengo la LISTA de MODULOS que NO tienen ASLR */
+    ret = get_modules_without_aslr ( snapshot , module_list );
+
+  /* Si hay algun problema con el SNAPSHOT */
+    if ( ret == FALSE )
+    {
+    /* Mensaje al USUARIO */
+      printf ( "[ ] Error: the snapshot doesn't exist or is invalid\n" );
+      exit ( 0 );
+    }
+
+  /* Si TODOS los modulos TIENEN ASLR */
+    if ( module_list.Len () == 0 )
+    {
+    /* Mensaje al USUARIO */
+      printf ( "[ ] Error: all modules have ASLR\n" );
+      return ( FALSE );
+    }
   }
 
 ///////////
@@ -5902,7 +6625,16 @@ int start_building_process ( int new_analysis , char *settings , char *snapshot 
     printf ( "[x] Module name: %s\n" , module_name );
 
   /* Obtengo la BASE del MODULO */
-    get_module_bases ( snapshot , module_name , &module_base , &real_module_base );
+    ret = get_module_bases ( snapshot , module_name , &module_base , &real_module_base );
+
+  /* Si el modulo NO esta en el SNAPSHOT */
+    if ( ret == FALSE )
+    {
+    /* Mensaje al USUARIO */
+      return ( FALSE );
+    }
+
+  /* Base del modulo */
     printf ( "[x] Module base = %x\n" , real_module_base );
 
   ///////////
@@ -5936,24 +6668,55 @@ int start_building_process ( int new_analysis , char *settings , char *snapshot 
 /* Si hay INVALID CHARS */
   if ( invalid_chars.Len () > 0 )
   {
-  /* Obtengo todos los GADGETS NEGADORES */
-    get_negator_rets ( new_analysis , module_base , real_module_base , settings , snapshot , invalid_chars , negator_rets );
+  /* Si el 0 o el 0x40 es INVALID CHAR */
+    if ( ( invalid_chars.Find ( ( void * ) 0x0 ) == TRUE ) || ( invalid_chars.Find ( ( void * ) 0x40 ) == TRUE ) )
+    {
+    /* Si el 0xff en INVALID CHAR */
+      if ( invalid_chars.Find ( ( void * ) 0xff ) == TRUE )
+      {
+      /* NO se puede setear SIZE ni PROTECTION */
+        printf ( "[ ] Error: invalid chars don't allow to set VirtualProtect SIZE/PROTECTION\n" );
+        return ( FALSE );
+      }
+    }
 
-  /* Agrego los GADGETS a la LISTA TOTAL */
-    all_gadgets.Append ( negator_rets );
+  /* Si el 0x40 es INVALID CHAR */
+    if ( invalid_chars.Find ( ( void * ) 0x40 ) == TRUE )
+    {
+    /* Si 0xbf y 0xc0 son INVALID CHAR */
+      if ( ( invalid_chars.Find ( ( void * ) 0xbf ) == TRUE ) && ( invalid_chars.Find ( ( void * ) 0xc0 ) == TRUE ) )
+      {
+      /* NO se puede setear SIZE ni PROTECTION */
+        printf ( "[ ] Error: invalid chars don't allow to set VirtualProtect.PROTECTION\n" );
+        return ( FALSE );
+      }
+    }
 
-  /* Mensaje al USUARIO */
-    printf ( "[x] NOT-NEG/RET gadgets found: %i\n" , negator_rets.Len () );
+  /* Si el 0x00, el 0x40 o IAT.VirtualProtect tiene INVALID CHARS */
+    if ( ( invalid_chars.Find ( ( void * ) 0x0 ) == TRUE ) || ( invalid_chars.Find ( ( void * ) 0x40 ) == TRUE ) || ( has_invalid_chars ( invalid_chars , vp_address ) == TRUE ) )
+    {
+    /* Obtengo todos los GADGETS NEGADORES */
+      get_negator_rets ( new_analysis , module_base , real_module_base , settings , snapshot , invalid_chars , negator_rets );
 
-  /* ORDENO los gadget de MEJOR a PEOR */
-    sort_negator_rets ( negator_rets );
+    /* Si tengo problemas con el 0 ( SIZE afectado ! ) */
+      if ( invalid_chars.Find ( ( void * ) 0x0 ) == TRUE )
+      {
+      /* Obtengo todos los GADGETS INCREMENTADORES */
+        get_incrementor_rets ( new_analysis , module_base , real_module_base , settings , snapshot , invalid_chars , incrementor_rets );
 
-  /* Imprimo los GADGETS ORDENADOS */
-//    for ( cont = 0 ; cont < negator_rets.Len () ; cont ++ )
-//    {
-//      gadget = ( GADGET * ) negator_rets.Get ( cont );
-//      printf ( "%i: %x\n" , cont , gadget -> address );
-//    }
+      /* ORDENO los gadgets de MEJOR a PEOR */
+        sort_incrementor_rets ( incrementor_rets );
+      }
+
+    /* Agrego los GADGETS a la LISTA TOTAL */
+      all_gadgets.Append ( negator_rets );
+
+    /* Mensaje al USUARIO */
+      printf ( "[x] NOT-NEG/RET gadgets found: %i\n" , negator_rets.Len () );
+
+    /* ORDENO los gadgets de MEJOR a PEOR */
+      sort_negator_rets ( negator_rets );
+    }
   }
 
 ///////////
@@ -5981,7 +6744,7 @@ int start_building_process ( int new_analysis , char *settings , char *snapshot 
   if ( pushad_rets.Len () == 0 )
   {
   /* Mensaje al USUARIO */
-    printf ( " [ ] Error: It's not possible to build a ROP Chain\n" );
+    printf ( " [ ] Error: it's not possible to build a ROP Chain\n" );
     return ( FALSE );
   }
 
@@ -6024,6 +6787,9 @@ int start_building_process ( int new_analysis , char *settings , char *snapshot 
   {
   /* Armo los SUPER-GADGETS NEGADOS */
     add_super_negated_pop_reg32_rets ( pop_reg32_rets , mov_reg32_reg32_rets , negator_rets );
+
+  /* Armo los SUPER-GADGETS INCREMENTORS */
+    add_super_incrementors_pop_reg32_rets ( pop_reg32_rets , incrementor_rets );
   }
 
 //  printf ( "bye bye ...\n" );
@@ -6043,7 +6809,7 @@ int start_building_process ( int new_analysis , char *settings , char *snapshot 
   if ( pop_reg32_rets.Len () == 0 )
   {
   /* Mensaje al USUARIO */
-    printf ( " [ ] Error: It's not possible to build a ROP Chain\n" );
+    printf ( " [ ] Error: it's not possible to build a ROP Chain\n" );
     return ( FALSE );
   }
 
@@ -6063,7 +6829,7 @@ int start_building_process ( int new_analysis , char *settings , char *snapshot 
   if ( mov_reg32_creg32_rets.Len () == 0 )
   {
   /* Mensaje al USUARIO */
-    printf ( " [ ] Error: It's not possible to read the IAT of the module\n" );
+    printf ( " [ ] Error: it's not possible to read the IAT of the module\n" );
     return ( FALSE );
   }
 
@@ -6073,6 +6839,12 @@ int start_building_process ( int new_analysis , char *settings , char *snapshot 
 //    gadget = ( GADGET * ) mov_reg32_creg32_rets.Get ( cont );
 //    printf ( "%i: %x\n" , cont , gadget -> address );
 //  }
+
+///////////
+
+/* Busco un RET NOP para USAR */
+  ret_nop_address = get_ret_nop ( all_gadgets , invalid_chars );
+//  printf ( "RET NOP VALIDO = %x\n" , ret_nop_address );
 
 ///////////
 
@@ -6099,14 +6871,14 @@ int start_building_process ( int new_analysis , char *settings , char *snapshot 
     printf ( " [x] Building a special JMP ESP ...\n" ); 
 
   /* Obtengo un SUPER-GADGET con un "JMP ESP" */
-    jmp_esp_gadget = get_super_jmp_esp ( pushad_rets , pop_reg32_rets );
+    jmp_esp_gadget = get_super_jmp_esp ( pushad_rets , pop_reg32_rets , ret_nop_address );
   }
 
 /* Si NO se PUDO ENCONTRAR un "JMP ESP" */
   if ( jmp_esp_gadget == NULL )
   {
   /* Mensaje al USUARIO */
-    printf ( " [ ] Error: It's not possible to build a ROP Chain\n" );
+    printf ( " [ ] Error: it's not possible to build a ROP Chain\n" );
     return ( FALSE );
   }
 
@@ -6114,12 +6886,12 @@ int start_building_process ( int new_analysis , char *settings , char *snapshot 
   super_jmp_esp_rop_chain.Add ( ( void * ) jmp_esp_gadget );
 
 /* Obtengo los POPS/COMENTS para el TERCER SUB-ROP-CHAIN */
-  set_jmp_esp_pops_and_comments ( super_jmp_esp_rop_chain , third_values_to_pop , third_comments );
+  set_jmp_esp_pops_and_comments ( super_jmp_esp_rop_chain , third_values_to_pop , third_comments , ret_nop_address );
 
 ///////////
 
 /* Armo los 2 sub-rop-chains ( STACK -> IAT -> ESI/EDI ) */
-  ret = find_iat_rop_chains ( vp_address , pop_reg32_rets , mov_reg32_reg32_rets , mov_reg32_creg32_rets , esi_sub_rop_chain , edi_sub_rop_chain );
+  ret = find_iat_rop_chains ( vp_address , invalid_chars , pop_reg32_rets , mov_reg32_reg32_rets , mov_reg32_creg32_rets , esi_sub_rop_chain , edi_sub_rop_chain );
 
 /* Si hay SOLUCION para ESI */
 //  if ( esi_sub_rop_chain.Len () > 0 )
@@ -6132,10 +6904,9 @@ int start_building_process ( int new_analysis , char *settings , char *snapshot 
 //    get_simple_gadgets ( esi_sub_rop_chain , simple_gadgets );
 //
 //  /* Recorro los gadgets */
-////    for ( cont = 0 ; cont < esi_sub_rop_chain.Len () ; cont ++ )
 //    for ( cont = 0 ; cont < simple_gadgets.Len () ; cont ++ )
 //    {
-////      gadget = ( GADGET * ) esi_sub_rop_chain.Get ( cont );
+//      gadget = ( GADGET * ) esi_sub_rop_chain.Get ( cont );
 //      gadget = ( GADGET * ) simple_gadgets.Get ( cont );
 //      printf ( "%i: %x\n" , cont , gadget -> address );
 //    }
@@ -6174,7 +6945,7 @@ int start_building_process ( int new_analysis , char *settings , char *snapshot 
   if ( ret == FALSE )
   {
   /* Mensaje al USUARIO */
-    printf ( "[ ] Error: There is not way to build a ROP CHAIN\n" );
+    printf ( "[ ] Error: there is not way to build a ROP CHAIN\n" );
     return ( FALSE );
   }
 
@@ -6201,35 +6972,12 @@ int start_building_process ( int new_analysis , char *settings , char *snapshot 
 ///////////
 
 /* Obtengo los POPS/COMENTS para el SEGUNDO SUB-ROP-CHAIN */
-  set_pushad_ret_pops_and_comments ( vp_address , data_section_address , data_section_size , invalid_chars , final_gadget , super_sub_rop_chain , second_values_to_pop , second_comments );
-
-///////////
-
-/* Pongo un "JMP ESP" al final */
-//  if ( jmp_esp_gadget -> is_super_gadget == FALSE )
-//  {
-//  /* Seteo los PUSHES/COMENTARIOS del GADGET */
-//    super_jmp_esp_rop_chain.Add ( ( void * ) jmp_esp_gadget );
-//    third_values_to_pop.Add ( NULL );
-//    third_comments.Add ( NULL );
-//  }
-//  else
-//  {
-//  /* Obtengo TODOS los GADGET que lo COMPONEN */
-//    decompose_gadget ( jmp_esp_gadget , jmp_esp_rop_chain );
-//
-//  /* Obtengo los POPS/COMENTS para el TERCER SUB-ROP-CHAIN */
-//    set_jmp_esp_pops_and_comments ( jmp_esp_rop_chain , third_values_to_pop , third_comments );
-//  }
+  set_pushad_ret_pops_and_comments ( vp_address , data_section_address , data_section_size , ret_nop_address , invalid_chars , final_gadget , super_sub_rop_chain , second_values_to_pop , second_comments );
 
 ///////////
 
 /* Concateno los SUB-ROP-CHAINS */
   rop_chain.Clear ();
-
-/* Obtengo TODOS los GADGETS del "IAT.VirtuaProtect" ROP-CHAIN */
-//  get_simple_gadgets ( super_iat_rop_chain , iat_rop_chain );
-//  rop_chain.Append ( iat_rop_chain );
 
 /* Obtengo TODOS los GADGETS del "PUSHAD/RET" */
   get_simple_gadgets ( super_sub_rop_chain , sub_rop_chain );
@@ -6292,10 +7040,10 @@ int main ( int argc , char *argv [] )
   if ( ( argc == 1 ) || ( argc > 4 ) )
   {
   /* Mensaje al usuario */
-    printf ( "\nAgafi-ROP v1.0\n" );
-    printf ( "Created by Nicolas A. Economou\n" );
-    printf ( "Core Security Technologies, Buenos Aires, Argentina (2014)\n" );
-    printf ( "\nUse: Agafi-rop option [settings.txt]\n\n" , argv [ 0 ] );
+    printf ( "\nAgafi-ROP v1.1\n" );
+    printf ( "Created by 'Nicolas A. Economou' (neconomou@coresecurity.com)\n" );
+    printf ( "Core Security Technologies, Buenos Aires, Argentina (2015)\n" );
+    printf ( "\nUse: agafi-rop option [settings.txt]\n\n" , argv [ 0 ] );
     printf ( "Options:\n" );
     printf ( " -f module_name\n" );
     printf ( " -rf module_name\n" );
@@ -6311,6 +7059,7 @@ int main ( int argc , char *argv [] )
     printf ( "\n" );
     printf ( "Assignations supported in settings.txt:\n" );
     printf ( " \"invalid_chars = 0x00,0x01,0x02,...,0xff\"\n" );
+    printf ( " \"modules=MODULE1, MODULE2, ...\"\n" );
 
     printf ( "\n" );
     printf ( "Besides, you can pass parameters (not objectives) directly to Agafi, like this:\n" );
@@ -6417,7 +7166,7 @@ int main ( int argc , char *argv [] )
     if ( is_valid_settings ( settings ) == FALSE )
     {
     /* Mensaje al usuario */
-      printf ( "[ ] Error: Invalid settings file\n" );
+      printf ( "[ ] Error: invalid settings file\n" );
 
     /* Salgo con ERROR */
       return ( FALSE );

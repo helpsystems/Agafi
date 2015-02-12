@@ -9,6 +9,10 @@
 
 #include <windows.h>
 #include <stdio.h>
+
+#include "qemu.c"
+#include "disassembler.c"
+
 #include "list.cpp"
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -31,6 +35,7 @@
 
 #define VAR_TEST_RANGE        0x80000000
 #define VAR_CDATA             0x80000001
+#define VAR_MODULES           0x80000002
 
 #define OP_REG_TO_REG         1
 #define OP_REGS_TO_REG        2
@@ -48,6 +53,7 @@
 
 #define AS_EQUAL_TO_VALUE     1
 #define AS_EQUAL_TO_RANGE     2
+#define AS_EQUAL_TO_STRING    3
 
 #define SP_OBJECTIVE          4
 #define PC_OBJECTIVE          8
@@ -87,43 +93,6 @@ typedef struct
   char module_name [ 256 ];
   void *data;
 } SECTION;
-
-typedef struct
-{
-  unsigned int padding;
-  unsigned int base;
-  unsigned int limit;
-  unsigned int flags;
-} QEMU_SEGMENT;
-
-typedef struct
-{
-  unsigned int eax;
-  unsigned int ecx;
-  unsigned int edx;
-  unsigned int ebx;
-  unsigned int esp;
-  unsigned int ebp;
-  unsigned int esi;
-  unsigned int edi;
-  unsigned int eip;
-  unsigned int eflags;
-  unsigned int cc_src;
-  unsigned int cc_dst;
-  unsigned int cc_op;
-  unsigned int df;
-  unsigned int hflags;
-  unsigned int hflags2;
-  QEMU_SEGMENT segments [ 6 ]; // ES,CS,SS,DS,FS,GS
-  QEMU_SEGMENT ldt;
-  QEMU_SEGMENT tr;
-  QEMU_SEGMENT gdt; /* only base and limit are used */
-  QEMU_SEGMENT idt; /* only base and limit are used */
-  unsigned int cr[5]; /* NOTE: cr1 is unused */
-  unsigned int padding [0x214/sizeof (unsigned int)];
-  unsigned int operation_code;
-  unsigned int operation_address;
-} QEMU_CONTEXT;
 
 typedef struct
 {
@@ -184,47 +153,8 @@ typedef struct
 
 ////////////////////////////////////////////////////////////////////////////////
 
-/* Codigo usado por Distorm */
-
-/* Static size of strings. Do not change this value. Keep Python wrapper in sync. */
-#define MAX_TEXT_SIZE (48)
-typedef struct
-{
-  unsigned int length;
-  unsigned char p [MAX_TEXT_SIZE]; /* p is a null terminated string. */
-} _WString;
-
-/*
- * Old decoded instruction structure in text format.
- * Used only for backward compatibility with diStorm64.
- * This structure holds all information the disassembler generates per instruction.
- */
-
-typedef struct
-{
-  _WString mnemonic; /* Mnemonic of decoded instruction, prefixed if required by REP, LOCK etc. */
-  _WString operands; /* Operands of the decoded instruction, up to 3 operands, comma-seperated. */
-  _WString instructionHex; /* Hex dump - little endian, including prefixes. */
-  unsigned int size; /* Size of decoded instruction. */
-//  _OffsetType offset; /* Start offset of the decoded instruction. */
-  unsigned int offset; /* Start offset of the decoded instruction. */
-} _DecodedInst;
-
-/* Decodes modes of the disassembler, 16 bits or 32 bits or 64 bits for AMD64, x86-64. */
-typedef enum { Decode16Bits = 0, Decode32Bits = 1, Decode64Bits = 2 } _DecodeType;
-
-/* Return code of the decoding function. */
-typedef enum { DECRES_NONE, DECRES_SUCCESS, DECRES_MEMORYERR, DECRES_INPUTERR, DECRES_FILTERED } _DecodeResult;
-
-////////////////////////////////////////////////////////////////////////////////
-
-char *disassembly ( void * , unsigned char * , unsigned int * );
-
-////////////////////////////////////////////////////////////////////////////////
-
 char *registers [] = {"eax","ecx","edx","ebx","esp","ebp","esi","edi","eip"};
 
-HMODULE hqemu = NULL;
 char *current_instruction;
 int change_eflags = FALSE;
 
@@ -370,178 +300,6 @@ asm byebye:
 
 void code_end ( void )
 {
-}
-
-////////////////////////////////////////////////////////////////////////////////
-
-QEMU_CONTEXT *init_vm ( void )
-{
-  static QEMU_CONTEXT * ( *qemu_init_vm ) ( void ) = NULL;
-  QEMU_CONTEXT *context;
-
-/* Si es la primera vez */
-  if ( qemu_init_vm == NULL )
-  {
-  /* Resuelvo el simbolo de la funcion */
-    qemu_init_vm = ( QEMU_CONTEXT * ( * ) ( void ) ) GetProcAddress ( hqemu , "init_vm" );
-  }
-
-/* Instancio la VM */
-  context = qemu_init_vm ();
-
-  return ( context );
-}
-
-////////////////////////////////////////////////////////////////////////////////
-
-void *allocate_memory ( void *address , unsigned int size )
-{
-  static void * ( *qemu_allocate_memory ) ( void * , unsigned int ) = NULL;
-  void *new_address;
-
-/* Si es la primera vez */
-  if ( qemu_allocate_memory == NULL )
-  {
-  /* Resuelvo el simbolo de la funcion */
-    qemu_allocate_memory = ( void * ( * ) ( void * , unsigned int ) ) GetProcAddress ( hqemu , "allocate_memory" );
-  }
-
-/* Alloco memoria */
-  new_address = ( void * ( * ) ( void * , unsigned int ) ) qemu_allocate_memory ( address , size );
-
-  return ( new_address );
-}
-
-////////////////////////////////////////////////////////////////////////////////
-
-int read_memory ( void *address , void *data , unsigned int size )
-{
-  static int ( *qemu_cpu_physical_memory_rw ) ( void * , void * , unsigned int , int ) = NULL;
-  int ret;
-  int res;
-
-/* Si es la primera vez */
-  if ( qemu_cpu_physical_memory_rw == NULL )
-  {
-  /* Resuelvo el simbolo de la funcion */
-    qemu_cpu_physical_memory_rw = ( int ( * ) ( void * , void * , unsigned int , int ) ) GetProcAddress ( hqemu , "cpu_physical_memory_rw" );
-  }
-
-/* Leo la memoria pedida ( read = 0 ) */
-  res = qemu_cpu_physical_memory_rw ( address , data , size , 0 );
-//  printf ( "READ = %i\n" , res );
-
-/* Si pude leer la memoria */
-  if ( res != 0 )
-  {
-  /* Retorno OK */
-    ret = TRUE;
-  }
-/* Si hubo algun ERROR */
-  else
-  {
-  /* Salgo con ERROR */
-    ret = FALSE;
-  }
-
-  return ( ret );
-}
-
-////////////////////////////////////////////////////////////////////////////////
-
-void write_memory ( void *data , void *address , unsigned int size )
-{
-  static int ( *qemu_cpu_physical_memory_write_rom ) ( void * , void * , unsigned int ) = NULL;
-
-/* Si es la primera vez */
-  if ( qemu_cpu_physical_memory_write_rom == NULL )
-  {
-  /* Resuelvo el simbolo de la funcion */
-    qemu_cpu_physical_memory_write_rom = ( int ( * ) ( void * , void * , unsigned int ) ) GetProcAddress ( hqemu , "cpu_physical_memory_write_rom" );
-  }
-
-/* Alloco memoria */
-  qemu_cpu_physical_memory_write_rom ( data , address , size );
-}
-
-////////////////////////////////////////////////////////////////////////////////
-
-int cpu_reset ( QEMU_CONTEXT *context )
-{
-  static int ( *qemu_cpu_reset ) ( QEMU_CONTEXT * ) = NULL;
-  int ret;
-
-/* Si es la primera vez */
-  if ( qemu_cpu_reset == NULL )
-  {
-  /* Resuelvo el simbolo de la funcion */
-    qemu_cpu_reset = ( int ( * ) ( QEMU_CONTEXT * ) ) GetProcAddress ( hqemu , "cpu_reset" );
-  }
-
-/* Alloco memoria */
-  ret = qemu_cpu_reset ( context );
-
-  return ( ret );
-}
-
-////////////////////////////////////////////////////////////////////////////////
-
-int do_cpu_init ( QEMU_CONTEXT *context )
-{
-  static int ( *qemu_do_cpu_init ) ( QEMU_CONTEXT * ) = NULL;
-  int ret;
-
-/* Si es la primera vez */
-  if ( qemu_do_cpu_init == NULL )
-  {
-  /* Resuelvo el simbolo de la funcion */
-    qemu_do_cpu_init = ( int ( * ) ( QEMU_CONTEXT * ) ) GetProcAddress ( hqemu , "do_cpu_init" );
-  }
-
-/* Alloco memoria */
-  ret = qemu_do_cpu_init ( context );
-
-  return ( ret );
-}
-
-////////////////////////////////////////////////////////////////////////////////
-
-int cpu_loop ( QEMU_CONTEXT *context )
-{
-  static int ( *qemu_cpu_loop ) ( QEMU_CONTEXT * ) = NULL;
-  int ret;
-
-/* Si es la primera vez */
-  if ( qemu_cpu_loop == NULL )
-  {
-  /* Resuelvo el simbolo de la funcion */
-    qemu_cpu_loop = ( int ( * ) ( QEMU_CONTEXT * ) ) GetProcAddress ( hqemu , "cpu_loop" );
-  }
-
-/* Alloco memoria */
-  ret = qemu_cpu_loop ( context );
-
-  return ( ret );
-}
-
-////////////////////////////////////////////////////////////////////////////////
-
-int cpu_x86_exec ( QEMU_CONTEXT *context )
-{
-  static int ( *qemu_cpu_x86_exec ) ( QEMU_CONTEXT * ) = NULL;
-  int ret;
-
-/* Si es la primera vez */
-  if ( qemu_cpu_x86_exec == NULL )
-  {
-  /* Resuelvo el simbolo de la funcion */
-    qemu_cpu_x86_exec = ( int ( * ) ( QEMU_CONTEXT * ) ) GetProcAddress ( hqemu , "cpu_x86_exec" );
-  }
-
-/* Alloco memoria */
-  ret = qemu_cpu_x86_exec ( context );
-
-  return ( ret );
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -1760,103 +1518,6 @@ void restore_memory ( List &sections , SECTION *current_section )
 
 ////////////////////////////////////////////////////////////////////////////////
 
-char *disassembly ( void *address , unsigned char *bytecodes , unsigned int *instruction_size )
-{
-  static int ( *distorm_decode32 ) ( void * , unsigned char * , unsigned int , unsigned int , void * , unsigned int , unsigned int * ) = NULL;
-  static int ( *distorm_decode64 ) ( uint64_t , unsigned char * , unsigned int , unsigned int , void * , unsigned int , unsigned int * ) = NULL;
-  static char instruction [ 256 ];
-  static HMODULE lib;
-  char *p;
-  _DecodedInst decodedInstructions [ 256 ];
-  unsigned int counter;
-  int ret;
-
-/* Si es la primera vez */
-  if ( ( distorm_decode32 == NULL ) && ( distorm_decode64 == NULL ) )
-  {
-  /* Resuelvo la direccion de la lib */
-    lib = LoadLibrary ( "distorm3.dll" );
-//    printf ( "lib = %x\n" , lib );
-
-  /* Resuelvo la direccion de la funcion */
-    distorm_decode32 = ( int ( * ) ( void * , unsigned char * , unsigned int , unsigned int , void * , unsigned int , unsigned int * ) ) GetProcAddress ( lib , "distorm_decode32" );
-    distorm_decode64 = ( int ( * ) ( uint64_t , unsigned char * , unsigned int , unsigned int , void * , unsigned int , unsigned int * ) ) GetProcAddress ( lib , "distorm_decode64" );
-//    printf ( "%x\n" , distorm_decode32 );
-  }
-
-//  asm int 3
-
-/* Si tengo la DLL que exporta la funcion de 32 bits */
-  if ( distorm_decode32 != NULL )
-  {
-  /* Desensamblo la instruccion */
-    ret = distorm_decode32 ( address , bytecodes ,  16 , Decode32Bits , &decodedInstructions , 16 , &counter );
-  }
-/* Si tengo la DLL que exporta la funcion de 64 bits */
-  else
-  {
-  /* Desensamblo la instruccion */
-    ret = distorm_decode64 ( ( uint64_t ) address , bytecodes ,  16 , Decode32Bits , &decodedInstructions , 16 , &counter );
-  }
-
-//  printf ( "ret = %i\n" , ret );
-//  printf ( "counter = %i\n" , counter );
-//  printf ( "size = %i\n" , decodedInstructions[0].size );
-//  printf ( "%s %s\n" , decodedInstructions[0].mnemonic.p , decodedInstructions[0].operands.p );
-
-/* Si pude traducir la instruccion */
-  if ( decodedInstructions[0].size > 0 )
-  {
-  /* Si la instruccion NO tiene operandos */
-    if ( decodedInstructions[0].operands.p [0] == '\x00' )
-    {
-    /* Armo la instruccion a retornar */
-      strcpy ( ( char * ) instruction , ( char * ) decodedInstructions[0].mnemonic.p );
-    }
-  /* Si la instruccion tiene operandos */
-    else
-    {
-    /* Armo la instruccion a retornar */
-      sprintf ( instruction , "%s %s" , decodedInstructions[0].mnemonic.p , decodedInstructions[0].operands.p );
-
-    /* Busco si la instruccion tiene un ", " */
-      p = strstr ( instruction , ", " );
-
-    /* Si encontre ese ESPACIO DEMAS */
-      if ( p != NULL )
-      {
-      /* Suprimo el espacio */
-        strcpy ( p + 1 , p + 2 );
-      }
-    }
-
-  /* Apunto a la instruccion */
-    p = instruction;
-
-  /* Convierto el string a MINUSCULAS */
-    while ( *p != 0 )
-    {
-    /* Convierto el caracter a minuscula */
-      *p = tolower ( *p );
-
-    /* Avanzo en el string */
-      p ++;
-    }
-  }
-  else
-  {
-  /* No pude traducir la instruccion */
-    strcpy ( instruction , "???" );
-  }
-
-/* Bytes usados por la instruccion */
-  *instruction_size = decodedInstructions[0].size;
-
-  return ( instruction );
-}
-
-////////////////////////////////////////////////////////////////////////////////
-
 void print_objective ( FILE *foutput , RESULT *result )
 {
   unsigned int asignaciones = 0;
@@ -2709,6 +2370,7 @@ int get_this_asignation ( char *line , List &sections , List &asignations )
   int module_found = FALSE;
   int ret = FALSE;
   int res;
+  List modules;
 
 /* Divido el objetivo en 2 */
   first_part = strtok ( line , "=" );
@@ -2729,40 +2391,40 @@ int get_this_asignation ( char *line , List &sections , List &asignations )
       /* Tengo el RANGO de BRUTFORCEO */
         asignation_ok = TRUE;
       }
-    /* Si NO es un RANGO EXPLICITO */
-      else
-      {
-      /* Recorro todas las SECCIONES del SNAPSHOT */
-        for ( cont = 0 ; cont < sections.Len () ; cont ++ )
-        {
-        /* Levanto la siguiente seccion */
-          section = ( SECTION * ) sections.Get ( cont );
-
-        /* Si es el modulo que estoy buscando */
-          if ( stricmp ( section -> module_name , second_part ) == 0 )
-          {
-          /* Si es la primer seccion del modulo */
-            if ( module_found == FALSE )
-            {
-            /* Seteo el primer rango del modulo */
-              base = ( unsigned int ) section -> address;
-              limit = ( unsigned int ) section -> address + section -> size;
-
-            /* Marco al modulo como encontrado */
-              module_found = TRUE;
-
-            /* Tengo el RANGO de BRUTFORCEO */
-              asignation_ok = TRUE;
-            } 
-          /* Si hay mas entradas para el modulo */
-            else
-            {
-            /* Actualizo SOLO el LIMITE */
-              limit = ( unsigned int ) section -> address + section -> size;
-            }
-          }
-        }
-      }
+//    /* Si NO es un RANGO EXPLICITO */
+//      else
+//      {
+//      /* Recorro todas las SECCIONES del SNAPSHOT */
+//        for ( cont = 0 ; cont < sections.Len () ; cont ++ )
+//        {
+//        /* Levanto la siguiente seccion */
+//          section = ( SECTION * ) sections.Get ( cont );
+//
+//        /* Si es el modulo que estoy buscando */
+//          if ( stricmp ( section -> module_name , second_part ) == 0 )
+//          {
+//          /* Si es la primer seccion del modulo */
+//            if ( module_found == FALSE )
+//            {
+//            /* Seteo el primer rango del modulo */
+//              base = ( unsigned int ) section -> address;
+//              limit = ( unsigned int ) section -> address + section -> size;
+//
+//            /* Marco al modulo como encontrado */
+//              module_found = TRUE;
+//
+//            /* Tengo el RANGO de BRUTFORCEO */
+//              asignation_ok = TRUE;
+//            } 
+//          /* Si hay mas entradas para el modulo */
+//            else
+//            {
+//            /* Actualizo SOLO el LIMITE */
+//              limit = ( unsigned int ) section -> address + section -> size;
+//            }
+//          }
+//        }
+//      }
 
     /* Si pude obtener el valor de "test_range" */
       if ( asignation_ok == TRUE )
@@ -2786,6 +2448,24 @@ int get_this_asignation ( char *line , List &sections , List &asignations )
           ret = TRUE;
         }
       }
+    }
+  /* Si es la LISTA de MODULOS donde BUSCAR */
+    else if ( stricmp ( first_part , "modules" ) == 0 )
+    {
+    /* Creo una ASIGNACION */
+      asignation = ( ASIGNATION * ) malloc ( sizeof ( ASIGNATION ) );
+      asignation -> var = VAR_MODULES;
+      asignation -> operation = AS_EQUAL_TO_STRING;
+      asignation -> v1 = ( unsigned int ) malloc ( strlen ( second_part ) + 1 );
+
+    /* Copio la lista de modulos */
+      strcpy ( ( char * ) asignation -> v1 , second_part );
+
+    /* Agrego la asignacion */
+      asignations.Add ( ( void * ) asignation );
+
+    /* Retorno OK */
+      ret = TRUE;
     }
   /* Si la primer parte es un RANGO CONTROLABLE */
     else if ( stricmp ( first_part , "cdata" ) == 0 )
@@ -2934,6 +2614,38 @@ char *my_strtok ( char *line , char *pattern )
   }
 
   return ( t );
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+int get_elements_from_string_list ( char *string , List &list )
+{
+  int ret = TRUE;
+  char *module;
+  char *s;
+
+/* Inicializo la lista */
+  list.Clear ();
+
+/* Busco el resto de las partes */
+  while ( ( s = strtok ( string , "," ) ) != NULL )
+  {
+  /* Alloco espacio para el nombre del modulo */
+    module = ( char * ) malloc ( strlen ( s ) + 1 );
+
+  /* Copio el nombre del modulo */
+    strcpy ( module , s );
+
+  /* Agrego el MODULO a la lista */
+    list.Add ( ( void * ) module );
+
+  /* Para NO empezar de nuevo */
+    string = NULL;
+
+//    printf ( "MODULE: %s\n" , module );
+  }
+
+  return ( ret );
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -3307,6 +3019,125 @@ void get_test_range ( List &asignations , unsigned int *base_address , unsigned 
 
 ////////////////////////////////////////////////////////////////////////////////
 
+int get_module_list ( List &asignations , List &module_list )
+{
+  ASIGNATION *asignation;
+  unsigned int cont;
+  int ret = FALSE;
+
+/* Recorro TODAS las ASIGNACIONES */
+  for ( cont = 0 ; cont < asignations.Len () ; cont ++ )
+  {
+  /* Levanto la siguiente ASIGNACION */
+    asignation = ( ASIGNATION * ) asignations.Get ( cont );
+
+  /* Si es la LISTA de MODULOS */
+    if ( asignation -> var == VAR_MODULES )
+    {
+    /* Si pude obtener los modulos de la lista */
+      if ( get_elements_from_string_list ( ( char * ) asignation -> v1 , module_list ) == TRUE )
+      {
+      /* Retorno OK */
+        ret = TRUE;
+
+      /* Dejo de buscar */
+        break;
+      }
+    /* Si la lista NO esta bien */
+      else
+      {
+      /* Salgo con ERROR */
+        return ( FALSE );
+      }
+    }
+  }
+
+  return ( ret );
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+int is_section_in_targeted_module ( List &modules , SECTION *section )
+{
+  unsigned int cont;
+  int ret = FALSE;
+  char *module;
+
+/* Recorro los MODULOS donde BUSCAR GADGETS */
+  for ( cont = 0 ; cont < modules.Len () ; cont ++ )
+  {
+  /* Levanto el siguiente modulo */
+    module = ( char * ) modules.Get ( cont );
+
+  /* Si la SECCION pertenece a este MODULO */
+    if ( stricmp ( module , section -> module_name ) == 0 )
+    {
+    /* Retorno OK */
+      ret = TRUE;
+
+    /* Dejo de buscar */
+      break;
+    }
+  }
+
+  return ( ret );
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+int check_loaded_modules ( List &sections , List &modules )
+{
+  SECTION *section;
+  unsigned int cont1, cont2;
+  char *module;
+  int module_found;
+  int ret = TRUE;
+
+/* Busco MODULO por MODULO */
+  for ( cont1 = 0 ; cont1 < modules.Len () ; cont1 ++ )
+  {
+  /* Levanto el siguiente MODULO */
+    module = ( char * ) modules.Get ( cont1 );
+
+  /* Inicializo el flag */
+    module_found = FALSE;
+
+  /* Recorro todas las SECCIONES */
+    for ( cont2 = 0 ; cont2 < sections.Len () ; cont2 ++ )
+    {
+    /* Levanto el siguiente MODULO */
+      section = ( SECTION * ) sections.Get ( cont2 );
+
+    /* Si es el MODULO que estoy buscando */
+      if ( stricmp ( section -> module_name , module ) == 0 )
+      {
+      /* Salgo OK */
+        module_found = TRUE;
+
+      /* Paso al siguiente */
+        break;
+      }
+    }
+
+  /* Si el modulo NO esta CARGADO */
+    if ( module_found == FALSE )
+    {
+    /* Mensaje de ERROR */
+      printf ( "[ ] Error: module '%s' not found in the snapshot\n" , module );
+
+    /* Salgo con ERROR */
+      ret = FALSE;
+
+    /* Dejo de buscar */
+      break;
+    }
+  }
+
+  return ( ret );
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
 void get_register_values ( List &asignations , QEMU_CONTEXT *context )
 {
   ASIGNATION *asignation;
@@ -3424,6 +3255,7 @@ int main ( int argc , char *argv [] )
   List objectives;
   List results;
   List snapshot_sections;
+  List module_list;
   FILE *foutput = stdout;
   void *stack;
   void *heap;
@@ -3442,6 +3274,7 @@ int main ( int argc , char *argv [] )
   unsigned int t0;
   int eflags_set_by_user = FALSE;
   int fake_snapshot = FALSE;
+  int snapshoter_res = 1;
   int processed;
   int completed;
   int pid;
@@ -3456,9 +3289,9 @@ int main ( int argc , char *argv [] )
 //  if ( argc != 2 ) && ( argc != 4 ) && ( argc != 5 ) )  /* Para probar con el shellcode de ARRIBA */
   if ( ( argc != 4 ) && ( argc != 5 ) )
   {
-    printf ( "\nAgafi v1.0\n" );
-    printf ( "Created by Nicolas A. Economou & Diego Juarez\n" );
-    printf ( "Core Security Technologies, Buenos Aires, Argentina (2014)\n" );
+    printf ( "\nAgafi v1.1\n" );
+    printf ( "Created by 'Nicolas A. Economou' & 'Diego Juarez'\n" );
+    printf ( "Core Security Technologies, Buenos Aires, Argentina (2015)\n" );
     printf ( "\nUse: agafi option objective.txt [output_file]\n" );
     printf ( "\nOptions:\n" );
     printf ( " -p pid\n" );
@@ -3475,7 +3308,8 @@ int main ( int argc , char *argv [] )
     printf ( "Assignations supported in objective.txt:\n" );
     printf ( " -EFLAGS=VALUE\n" );
     printf ( " -REG=VALUE\n" );
-    printf ( " -test_range=BASE,LIMIT or test_range=module_name\n" );
+    printf ( " -modules=MODULE1, MODULE2, ...\n" );
+    printf ( " -test_range=BASE,LIMIT\n" );
 
     printf ( "\n" );
     printf ( "Objectives supported in objective.txt:\n" );
@@ -3507,37 +3341,37 @@ int main ( int argc , char *argv [] )
 /////////
 
 /* Si el OS no tiene la funcion DecodePointer */
-//  if ( GetProcAddress ( LoadLibrary ( "kernel32.dll" ) , "DecodePointer" ) == NULL )
-//  {
-//  /* Hack para poder usar DISTORM en OSs que no tienen las funcion "DecodePointer" */
-//    void *p = GetProcAddress ( GetModuleHandle ( "kernel32.dll" ) , "Beep" );
-//    unsigned long int escritos;
-//
-//  /* Patcheo la funcion Beep con instrucciones */
-//    WriteProcessMemory ( ( HANDLE ) -1 , ( void * ) p , ( void * ) "\x8b\x44\x24\x04\xc2\x04\x00" , 7 , &escritos );
-//  }
+  if ( GetProcAddress ( LoadLibrary ( "kernel32.dll" ) , "DecodePointer" ) == NULL )
+  {
+  /* Hack para poder usar DISTORM en OSs que no tienen las funcion "DecodePointer" */
+    void *p = GetProcAddress ( GetModuleHandle ( "kernel32.dll" ) , "Beep" );
+    unsigned long int escritos;
+
+  /* Patcheo la funcion Beep con instrucciones */
+    WriteProcessMemory ( ( HANDLE ) -1 , ( void * ) p , ( void * ) "\x8b\x44\x24\x04\xc2\x04\x00" , 7 , &escritos );
+  }
 
 /////////
 
 /* Si NO esta DISTORM */
-  if ( LoadLibrary ( "distorm3.dll" ) == NULL )
+  if ( LoadLibrary ( disasm_lib ) == NULL )
   {
   /* Mensaje al USUARIO */
-    printf ( "\n[ ] Error: 'distorm3.dll' not found\n" );
-    printf ( "\n*** IMPORTANT *** Download 'distorm3.dll' from \"https://code.google.com/p/distorm/downloads/detail?name=distorm3-3-dlls.zip\"\n" );
+    printf ( "\n[ ] Error: '%s' not found\n" , disasm_lib );
+    printf ( "\n*** IMPORTANT *** Download '%s' from \"https://code.google.com/p/distorm/downloads/detail?name=distorm3-3-dlls.zip\"\n" , disasm_lib );
     return ( 0 );
   }
 
 /////////
 
 /* Cargo QEMU */
-  hqemu = LoadLibrary ( "pyqemulib.dll" );
+  hqemu = LoadLibrary ( qemu_module );
 //  printf ( "hqemu = %x\n" , hqemu );
 
 /* Si QEMU NO pudo ser levantado */
   if ( hqemu == NULL )
   {
-    printf ( "\n[ ] Error: pyqemulib.dll not found\n" );
+    printf ( "\n[ ] Error: %s not found\n" , qemu_module );
     return ( 0 );
   }
 
@@ -3558,7 +3392,7 @@ int main ( int argc , char *argv [] )
 
   /* Obtengo el SNAPSHOT del PROCESO */
     snprintf ( cmd , sizeof ( cmd ) , "gisnap %i %s" , pid , snapshot );
-    system ( cmd );
+    snapshoter_res = system ( cmd );
   }
 /* Si el SNAPSHOT ya fue tomado */
   else if ( strcmp ( argv [ 1 ] , "-rp" ) == 0 )
@@ -3577,7 +3411,7 @@ int main ( int argc , char *argv [] )
 
   /* Obtengo el SNAPSHOT del file ( Modulo o binario RAW ) */
     snprintf ( cmd , sizeof ( cmd ) , "fsnap %s %s" , argv [ 2 ] , snapshot );
-    system ( cmd );
+    snapshoter_res = system ( cmd );
   }
 /* Si el SNAPSHOT ya fue tomado */
   else if ( strcmp ( argv [ 1 ] , "-rf" ) == 0 )
@@ -3596,6 +3430,16 @@ int main ( int argc , char *argv [] )
   {
   /* Mensaje al USUARIO */
     printf ( "[ ] Error: Invalid option\n" );
+    return ( 0 );
+  }
+
+/////////
+
+/* Si hubo un ERROR con el SNAPSHOT */
+  if ( snapshoter_res != 1 )
+  {
+  /* Mensaje al USUARIO */
+    printf ( "[ ] Error: Snapshot not taken\n" );
     return ( 0 );
   }
 
@@ -3721,14 +3565,14 @@ int main ( int argc , char *argv [] )
 /////////
 
 /* Estado inicial de los REGISTROS */
-  initial_context.eax = SYMBOLIC_REGISTER_VALUE | 0x00010101;
-  initial_context.ecx = SYMBOLIC_REGISTER_VALUE | 0x00020202;
-  initial_context.edx = SYMBOLIC_REGISTER_VALUE | 0x00040404;
-  initial_context.ebx = SYMBOLIC_REGISTER_VALUE | 0x00080808;
-  initial_context.esp = SYMBOLIC_REGISTER_VALUE | 0x00101010;
-  initial_context.ebp = SYMBOLIC_REGISTER_VALUE | 0x00202020;
-  initial_context.esi = SYMBOLIC_REGISTER_VALUE | 0x00404040;
-  initial_context.edi = SYMBOLIC_REGISTER_VALUE | 0x00808080;
+  initial_context.eax = SYMBOLIC_REGISTER_VALUE | 0x000101ff;
+  initial_context.ecx = SYMBOLIC_REGISTER_VALUE | 0x000202ff;
+  initial_context.edx = SYMBOLIC_REGISTER_VALUE | 0x000404ff;
+  initial_context.ebx = SYMBOLIC_REGISTER_VALUE | 0x000808ff;
+  initial_context.esp = SYMBOLIC_REGISTER_VALUE | 0x001010ff;
+  initial_context.ebp = SYMBOLIC_REGISTER_VALUE | 0x002020ff;
+  initial_context.esi = SYMBOLIC_REGISTER_VALUE | 0x004040ff;
+  initial_context.edi = SYMBOLIC_REGISTER_VALUE | 0x008080ff;
   initial_context.eip = 0xffffffff;
 
 /////////
@@ -3842,21 +3686,44 @@ int main ( int argc , char *argv [] )
 
 /////////
 
-/* Obtengo los VALORES INICIALES */
+/* Obtengo la lista de MODULOS donde BUSCAR */
+  get_module_list ( asignations , module_list );
+
+/* Si hay una lista de MODULOS donde BUSCAR */
+  if ( module_list.Len () > 0 )
+  {
+  /* Si NO estan TODOS los MODULOS */
+    if ( check_loaded_modules ( snapshot_sections , module_list ) == FALSE )
+    {
+    /* Mensaje de ERROR */
+      printf ( "[ ] Error: invalid 'modules' parameter\n" );
+
+    /* Salgo con ERROR */
+      return ( FALSE );
+    }
+  }
+
+/////////
+
+/* Obtengo el RANGO de TESTEO */
   get_test_range ( asignations , &base_address , &limit_address );
 
 /* Si la variable "test_range" NO fue SETEADA */
   if ( ( base_address == 0 ) && ( limit_address == 0xffffffff ) )
   {
-  /* Si el SNAPSHOT tiene UNA SOLA SECCION */
-    if ( snapshot_sections.Len () > 1 )
+  /* Si NO hay MODULOS seteados por el USUARIO */
+    if ( module_list.Len () == 0 )
     {
-      printf ( "\n" );
-      printf ( "Warning: Agafi will process all the snapshot executable addresses\n" );
-      printf ( "Advice: Set the 'test_range' var in the config file\n" );
+    /* Si el SNAPSHOT tiene MAS DE UNA SECCION */
+      if ( snapshot_sections.Len () > 1 )
+      {
+        printf ( "\n" );
+        printf ( "Warning: Agafi will process all the snapshot executable addresses\n" );
+        printf ( "Advice: Set the 'test_range' var in the config file\n" );
 
-    /* Una demora para que se vea el mensaje */
-      Sleep ( 1000 );
+      /* Una demora para que se vea el mensaje */
+        Sleep ( 1000 );
+      }
     }
   }
 
@@ -4061,8 +3928,18 @@ int main ( int argc , char *argv [] )
       continue;
     }
 
+  /* Si hay MODULOS donde BUSCAR */
+    if ( module_list.Len () > 0 )
+    {
+    /* Si esta seccion NO esta en los MODULOS TARGETEADOS */
+      if ( is_section_in_targeted_module ( module_list , section ) == FALSE )
+      {
+      /* Paso a la siguiente seccion */
+        continue;
+      }
+    }
   /* Si la seccion TIENE ASLR */
-    if ( section -> protection & RANDOMIZABLE )
+    else if ( section -> protection & RANDOMIZABLE )
     {
     /* Paso a la siguiente seccion */
       continue;
